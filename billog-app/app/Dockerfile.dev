@@ -1,0 +1,46 @@
+# Development Dockerfile with hot-reload
+FROM node:20-slim
+
+WORKDIR /app
+
+# Install pnpm and git (needed for some npm packages)
+RUN apt-get update && apt-get install -y \
+    git \
+    fonts-thai-tlwg \
+    wget \
+    --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/* \
+    && corepack enable && corepack prepare pnpm@latest --activate
+
+# Copy package files
+COPY package.json pnpm-lock.yaml* ./
+
+# Install ALL dependencies (including dev)
+RUN pnpm install
+
+# Copy prisma schema and generate client
+COPY prisma ./prisma/
+RUN pnpm prisma generate
+
+# Copy source code
+COPY . .
+
+# Build TypeScript (clean tsbuildinfo first to ensure full build)
+RUN rm -f tsconfig.tsbuildinfo && ./node_modules/.bin/nest build
+
+# Set environment
+ENV NODE_ENV=development
+ENV PORT=8000
+
+# Expose port
+EXPOSE 8000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://localhost:8000/health || exit 1
+
+# Copy entrypoint
+COPY docker-entrypoint.dev.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
+
+CMD ["/docker-entrypoint.sh"]

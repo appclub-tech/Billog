@@ -1,0 +1,28 @@
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: Prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+
+  - name: PostgreSQL
+    type: postgres
+    uid: PostgreSQL
+    access: proxy
+    url: ep-frosty-wave-a1gaslj7-pooler.ap-southeast-1.aws.neon.tech:5432
+    database: neondb
+    user: neondb_owner
+    secureJsonData:
+      password: npg_4BHwsZb9NPly
+    jsonData:
+      sslmode: require
+      postgresVersion: 1500
+      timescaledb: false
+      maxOpenConns: 5
+      maxIdleConns: 2
+      connMaxLifetime: 14400
+    editable: true

@@ -1,0 +1,246 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        }
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 0 },
+      "id": 1,
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "targets": [{ "datasource": { "type": "postgres", "uid": "PostgreSQL" }, "format": "table", "rawSql": "SELECT COUNT(*) as total FROM expenses", "refId": "A" }],
+      "title": "Total Expenses",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } }
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 0 },
+      "id": 2,
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "targets": [{ "datasource": { "type": "postgres", "uid": "PostgreSQL" }, "format": "table", "rawSql": "SELECT COUNT(*) as total FROM transfer", "refId": "A" }],
+      "title": "Total Transfers",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } }
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 0 },
+      "id": 3,
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "targets": [{ "datasource": { "type": "postgres", "uid": "PostgreSQL" }, "format": "table", "rawSql": "SELECT COUNT(*) as total FROM account", "refId": "A" }],
+      "title": "Total Accounts",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } }
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 0 },
+      "id": 4,
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "targets": [{ "datasource": { "type": "postgres", "uid": "PostgreSQL" }, "format": "table", "rawSql": "SELECT COUNT(*) as total FROM users", "refId": "A" }],
+      "title": "Total Users",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } }
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 0 },
+      "id": 13,
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "targets": [{ "datasource": { "type": "postgres", "uid": "PostgreSQL" }, "format": "table", "rawSql": "SELECT COUNT(*) as total FROM categories", "refId": "A" }],
+      "title": "Total Categories",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } }
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 0 },
+      "id": 14,
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "targets": [{ "datasource": { "type": "postgres", "uid": "PostgreSQL" }, "format": "table", "rawSql": "SELECT COUNT(*) as total FROM sources", "refId": "A" }],
+      "title": "Total Sources",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "axisBorderShow": false, "axisCenteredZero": false, "axisColorMode": "text", "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "bars", "fillOpacity": 80, "gradientMode": "none", "hideFrom": { "legend": false, "tooltip": false, "viz": false }, "lineWidth": 1, "scaleDistribution": { "type": "linear" }, "showPoints": "never", "stacking": { "group": "A", "mode": "normal" } },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] },
+          "unit": "currencyTHB"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "id": 5,
+      "options": { "legend": { "calcs": ["sum"], "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [{
+        "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+        "format": "time_series",
+        "rawSql": "SELECT DATE_TRUNC('day', \"createdAt\") as time, SUM(amount) as value FROM expenses WHERE \"createdAt\" > NOW() - INTERVAL '30 days' GROUP BY DATE_TRUNC('day', \"createdAt\") ORDER BY time",
+        "refId": "A"
+      }],
+      "title": "Daily Expenses (30 days)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "axisBorderShow": false, "axisCenteredZero": false, "axisColorMode": "text", "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "bars", "fillOpacity": 80, "gradientMode": "none", "hideFrom": { "legend": false, "tooltip": false, "viz": false }, "lineWidth": 1, "scaleDistribution": { "type": "linear" }, "showPoints": "never", "stacking": { "group": "A", "mode": "normal" } },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "id": 6,
+      "options": { "legend": { "calcs": ["sum"], "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [{
+        "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+        "format": "time_series",
+        "rawSql": "SELECT DATE_TRUNC('day', \"createdAt\") as time, COUNT(*) as value FROM transfer WHERE \"createdAt\" > NOW() - INTERVAL '30 days' GROUP BY DATE_TRUNC('day', \"createdAt\") ORDER BY time",
+        "refId": "A"
+      }],
+      "title": "Daily Transfers (30 days)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } } },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 12 },
+      "id": 7,
+      "options": { "displayLabels": ["name", "value"], "legend": { "displayMode": "table", "placement": "right", "showLegend": true }, "pieType": "pie", "reduceOptions": { "calcs": ["sum"], "fields": "", "values": true }, "tooltip": { "mode": "single", "sort": "none" } },
+      "targets": [{
+        "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+        "format": "table",
+        "rawSql": "SELECT COALESCE(c.name, 'Uncategorized') as category, SUM(e.amount) as total FROM expenses e LEFT JOIN categories c ON e.\"categoryId\" = c.id GROUP BY c.name ORDER BY total DESC LIMIT 10",
+        "refId": "A"
+      }],
+      "title": "Expenses by Category",
+      "type": "piechart"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } } },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 12 },
+      "id": 8,
+      "options": { "displayLabels": ["name", "value"], "legend": { "displayMode": "table", "placement": "right", "showLegend": true }, "pieType": "pie", "reduceOptions": { "calcs": ["sum"], "fields": "", "values": true }, "tooltip": { "mode": "single", "sort": "none" } },
+      "targets": [{
+        "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+        "format": "table",
+        "rawSql": "SELECT channel, COUNT(*) as count FROM sources GROUP BY channel",
+        "refId": "A"
+      }],
+      "title": "Sources by Channel",
+      "type": "piechart"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } } },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 12 },
+      "id": 9,
+      "options": { "displayLabels": ["name", "value"], "legend": { "displayMode": "table", "placement": "right", "showLegend": true }, "pieType": "pie", "reduceOptions": { "calcs": ["sum"], "fields": "", "values": true }, "tooltip": { "mode": "single", "sort": "none" } },
+      "targets": [{
+        "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+        "format": "table",
+        "rawSql": "SELECT CASE code WHEN 100 THEN 'ASSET' WHEN 200 THEN 'LIABILITY' WHEN 300 THEN 'EXPENSE' ELSE 'OTHER' END as type, COUNT(*) as count FROM account GROUP BY code",
+        "refId": "A"
+      }],
+      "title": "Accounts by Type",
+      "type": "piechart"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+      "fieldConfig": { "defaults": { "custom": { "align": "auto", "cellOptions": { "type": "auto" }, "inspect": false }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } } },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 20 },
+      "id": 15,
+      "options": { "cellHeight": "sm", "footer": { "countRows": false, "fields": "", "reducer": ["sum"], "show": false }, "showHeader": true },
+      "targets": [{
+        "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+        "format": "table",
+        "rawSql": "SELECT id, name, \"nameTh\", icon, color, \"createdAt\" FROM categories ORDER BY name",
+        "refId": "A"
+      }],
+      "title": "Categories",
+      "type": "table"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+      "fieldConfig": { "defaults": { "custom": { "align": "auto", "cellOptions": { "type": "auto" }, "inspect": false }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } } },
+      "gridPos": { "h": 10, "w": 12, "x": 0, "y": 28 },
+      "id": 10,
+      "options": { "cellHeight": "sm", "footer": { "countRows": false, "fields": "", "reducer": ["sum"], "show": false }, "showHeader": true },
+      "targets": [{
+        "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+        "format": "table",
+        "rawSql": "SELECT e.id, e.description, e.amount, e.currency, c.name as category, u.name as paid_by, e.\"createdAt\" FROM expenses e LEFT JOIN categories c ON e.\"categoryId\" = c.id LEFT JOIN users u ON e.\"paidById\" = u.id ORDER BY e.\"createdAt\" DESC LIMIT 20",
+        "refId": "A"
+      }],
+      "title": "Recent Expenses",
+      "type": "table"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+      "fieldConfig": { "defaults": { "custom": { "align": "auto", "cellOptions": { "type": "auto" }, "inspect": false }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } } },
+      "gridPos": { "h": 10, "w": 12, "x": 12, "y": 28 },
+      "id": 11,
+      "options": { "cellHeight": "sm", "footer": { "countRows": false, "fields": "", "reducer": ["sum"], "show": false }, "showHeader": true },
+      "targets": [{
+        "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+        "format": "table",
+        "rawSql": "SELECT t.id, t.amount, CASE t.code WHEN 1 THEN 'EXPENSE_SPLIT' WHEN 2 THEN 'SETTLEMENT' WHEN 3 THEN 'ADJUSTMENT' ELSE 'OTHER' END as type, t.debit_account_id, t.credit_account_id, t.\"createdAt\" FROM transfer t ORDER BY t.\"createdAt\" DESC LIMIT 20",
+        "refId": "A"
+      }],
+      "title": "Recent Transfers",
+      "type": "table"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+      "fieldConfig": { "defaults": { "custom": { "align": "auto", "cellOptions": { "type": "auto" }, "inspect": false }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } } },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 38 },
+      "id": 12,
+      "options": { "cellHeight": "sm", "footer": { "countRows": false, "fields": "", "reducer": ["sum"], "show": false }, "showHeader": true },
+      "targets": [{
+        "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+        "format": "table",
+        "rawSql": "SELECT a.id, u.name as user_name, s.channel as source_channel, CASE a.ledger WHEN 1 THEN 'THB' WHEN 2 THEN 'USD' WHEN 3 THEN 'AUD' ELSE 'OTHER' END as currency, CASE a.code WHEN 100 THEN 'ASSET' WHEN 200 THEN 'LIABILITY' WHEN 300 THEN 'EXPENSE' ELSE 'OTHER' END as type, a.debits_posted, a.credits_posted, (a.credits_posted - a.debits_posted) as balance FROM account a LEFT JOIN users u ON a.\"userId\" = u.id LEFT JOIN sources s ON a.\"sourceId\" = s.id ORDER BY ABS(a.credits_posted - a.debits_posted) DESC LIMIT 20",
+        "refId": "A"
+      }],
+      "title": "Account Balances",
+      "type": "table"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 38,
+  "tags": ["billog", "database", "expenses"],
+  "templating": { "list": [] },
+  "time": { "from": "now-7d", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Billog Database",
+  "uid": "billog-db",
+  "version": 1
+}

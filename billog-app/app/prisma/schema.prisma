@@ -1,0 +1,544 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// CORE TABLES
+// ============================================
+
+model User {
+  id        String   @id @default(cuid())
+  name      String?
+  email     String?  @unique
+  phone     String?
+  avatarUrl String?
+  timezone  String   @default("Asia/Bangkok")
+  language  String   @default("th")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  identities      UserIdentity[]
+  sourceMemberships SourceMember[]
+  expensesPaid    Expense[]        @relation("PaidBy")
+  accounts        Account[]        // Ledger accounts owned by this user
+  budgets         Budget[]
+  summaries       UserSummary[]
+  paymentMethods  PaymentMethod[]
+  taxClassifications ExpenseTaxClassification[]
+
+  @@map("users")
+}
+
+model UserIdentity {
+  id         String   @id @default(cuid())
+  userId     String
+  channel    Channel
+  channelId  String   // LINE user ID, WhatsApp JID, etc.
+  displayName String?
+  metadata   Json?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  // Relations
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([channel, channelId])
+  @@index([userId])
+  @@map("user_identities")
+}
+
+// Source = Conversation context (DM or Group)
+model Source {
+  id          String     @id @default(cuid())
+  channel     Channel
+  channelId   String     // LINE group ID, WhatsApp group JID, etc.
+  type        SourceType @default(GROUP)
+  name        String?
+  description String?
+  metadata    Json?
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  // Relations
+  members    SourceMember[]
+  expenses   Expense[]
+  accounts   Account[]      // Ledger accounts in this group
+  pools      Pool[]
+  budgets    Budget[]
+  receipts   Receipt[]
+
+  @@unique([channel, channelId])
+  @@map("sources")
+}
+
+model SourceMember {
+  id        String   @id @default(cuid())
+  sourceId  String
+  userId    String
+  nickname  String?  // Display name within this source
+  role      MemberRole @default(MEMBER)
+  isActive  Boolean  @default(true)
+  joinedAt  DateTime @default(now())
+  leftAt    DateTime?
+
+  // Relations
+  source Source @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([sourceId, userId])
+  @@index([sourceId])
+  @@index([userId])
+  @@map("source_members")
+}
+
+// ============================================
+// EXPENSE TABLES
+// ============================================
+
+model Category {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  nameTh      String?
+  icon        String?
+  color       String?
+  parentId    String?
+  sortOrder   Int      @default(0)
+  isSystem    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  // Relations
+  parent   Category?  @relation("CategoryHierarchy", fields: [parentId], references: [id])
+  children Category[] @relation("CategoryHierarchy")
+  expenses Expense[]
+  budgets  Budget[]
+  taxMappings CategoryTaxMapping[]
+
+  @@map("categories")
+}
+
+model Expense {
+  id          String   @id @default(cuid())
+  sourceId    String
+  paidById    String
+  categoryId  String?
+  poolId      String?
+
+  description String
+  amount      Decimal  @db.Decimal(15, 2)
+  currency    String   @default("THB")
+
+  date        DateTime @default(now())
+  notes       String?
+  metadata    Json?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  source   Source    @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  paidBy   User      @relation("PaidBy", fields: [paidById], references: [id])
+  category Category? @relation(fields: [categoryId], references: [id])
+  pool     Pool?     @relation(fields: [poolId], references: [id])
+
+  items      ExpenseItem[]
+  receipt    Receipt?
+  transfers  Transfer[]     // Ledger transfers created for this expense
+  paymentMethodLinks ExpensePaymentMethod[]
+  taxClassifications ExpenseTaxClassification[]
+
+  @@index([sourceId])
+  @@index([paidById])
+  @@index([categoryId])
+  @@index([date])
+  @@map("expenses")
+}
+
+
+model ExpenseItem {
+  id             String   @id @default(cuid())
+  expenseId      String
+  name           String
+  nameEn         String?
+  quantity       Decimal  @default(1) @db.Decimal(10, 3)
+  unitPrice      Decimal  @db.Decimal(15, 2)
+  totalPrice     Decimal  @db.Decimal(15, 2)
+  ingredientType String?  // meat, seafood, dairy, etc.
+  assignedTo     String?  // User ID who this item is assigned to (for item-level splitting)
+  metadata       Json?
+  createdAt      DateTime @default(now())
+
+  // Relations
+  expense Expense @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+
+  @@index([expenseId])
+  @@index([name])
+  @@index([assignedTo])
+  @@map("expense_items")
+}
+
+// ============================================
+// TIGERBEETLE-COMPATIBLE LEDGER TABLES
+// ============================================
+
+// Account - TigerBeetle structure with Yimmy relations
+model Account {
+  id              String   @id @default(cuid())
+
+  // Balance fields (TigerBeetle uses u128, we use Decimal for precision)
+  debits_pending  Decimal  @default(0) @db.Decimal(38, 0)
+  debits_posted   Decimal  @default(0) @db.Decimal(38, 0)
+  credits_pending Decimal  @default(0) @db.Decimal(38, 0)
+  credits_posted  Decimal  @default(0) @db.Decimal(38, 0)
+
+  // Yimmy relations (explicit FKs for data integrity)
+  userId          String?  // Owner of this account
+  sourceId        String?  // Group/conversation context
+
+  // TigerBeetle user data fields (for additional metadata)
+  user_data_128   String?  // Format: "userId:sourceId" (legacy/compatibility)
+  user_data_64    BigInt?  // Secondary timestamp or ID
+  user_data_32    Int?     // Category code, locale, etc.
+
+  // Core fields
+  ledger          Int      // 1=THB, 2=USD, 3=AUD (currency partition)
+  code            Int      // 100=ASSET, 200=LIABILITY, 300=EXPENSE, 400=INCOME
+  flags           Int      @default(0)
+  timestamp       BigInt   @default(0) // Nanoseconds since epoch
+
+  // Relations
+  user            User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  source          Source?  @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  debits          Transfer[] @relation("DebitAccount")
+  credits         Transfer[] @relation("CreditAccount")
+
+  @@unique([ledger, userId, sourceId, code])
+  @@index([ledger])
+  @@index([code])
+  @@index([userId])
+  @@index([sourceId])
+  @@index([user_data_128])
+  @@map("account")
+}
+
+// Transfer - TigerBeetle structure with Yimmy relations
+model Transfer {
+  id                String   @id @default(cuid())
+
+  // Account references
+  debit_account_id  String
+  credit_account_id String
+
+  // Amount (TigerBeetle uses u128, we use Decimal)
+  amount            Decimal  @db.Decimal(38, 0)
+
+  // Two-phase transfer support
+  pending_id        String?  // References pending transfer
+  timeout           Int      @default(0) // Seconds until auto-void
+
+  // Yimmy relations (explicit FK for data integrity)
+  expenseId         String?  // Links to expense that created this transfer
+
+  // TigerBeetle user data fields (for additional metadata)
+  user_data_128     String?  // Legacy/compatibility field
+  user_data_64      BigInt?  // Secondary ID
+  user_data_32      Int?     // Payment method code for settlements
+
+  // Core fields
+  ledger            Int      // Must match both accounts
+  code              Int      // 1=EXPENSE_SPLIT, 2=SETTLEMENT, 3=ADJUSTMENT
+  flags             Int      @default(0)
+  timestamp         BigInt   @default(0) // Nanoseconds since epoch
+
+  // Relations
+  debitAccount      Account  @relation("DebitAccount", fields: [debit_account_id], references: [id])
+  creditAccount     Account  @relation("CreditAccount", fields: [credit_account_id], references: [id])
+  expense           Expense? @relation(fields: [expenseId], references: [id], onDelete: SetNull)
+
+  @@index([debit_account_id])
+  @@index([credit_account_id])
+  @@index([expenseId])
+  @@index([ledger])
+  @@index([code])
+  @@index([timestamp])
+  @@index([user_data_128])
+  @@map("transfer")
+}
+
+// ============================================
+// BUDGET TABLES
+// ============================================
+
+model Budget {
+  id         String       @id @default(cuid())
+  sourceId   String?
+  userId     String?
+  categoryId String?
+
+  amount     Decimal      @db.Decimal(15, 2)
+  currency   String       @default("THB")
+  period     BudgetPeriod @default(MONTHLY)
+  startDate  DateTime
+  endDate    DateTime?
+
+  alertThreshold Decimal? @db.Decimal(5, 2) @default(80)
+  isActive   Boolean      @default(true)
+  createdAt  DateTime     @default(now())
+  updatedAt  DateTime     @updatedAt
+
+  // Relations
+  source   Source?   @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  user     User?     @relation(fields: [userId], references: [id])
+  category Category? @relation(fields: [categoryId], references: [id])
+
+  @@index([sourceId])
+  @@index([userId])
+  @@index([categoryId])
+  @@map("budgets")
+}
+
+// ============================================
+// POOL TABLES (for trips, events, etc.)
+// ============================================
+
+model Pool {
+  id          String    @id @default(cuid())
+  sourceId    String
+  name        String
+  description String?
+  targetAmount Decimal? @db.Decimal(15, 2)
+  currency    String    @default("THB")
+  isActive    Boolean   @default(true)
+  startDate   DateTime  @default(now())
+  endDate     DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  // Relations
+  source   Source    @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  expenses Expense[]
+
+  @@index([sourceId])
+  @@map("pools")
+}
+
+// ============================================
+// RECEIPT / OCR TABLES
+// ============================================
+
+model Receipt {
+  id           String   @id @default(cuid())
+  expenseId    String   @unique
+  sourceId     String
+
+  imageUrl     String?
+  storeName    String?
+  storeAddress String?
+  receiptDate  DateTime?
+  subtotal     Decimal? @db.Decimal(15, 2)
+  tax          Decimal? @db.Decimal(15, 2)
+  total        Decimal? @db.Decimal(15, 2)
+  currency     String   @default("THB")
+
+  rawOcrData   Json?
+  confidence   Decimal? @db.Decimal(5, 2)
+  createdAt    DateTime @default(now())
+
+  // Relations
+  expense Expense @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+  source  Source  @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+
+  @@index([sourceId])
+  @@map("receipts")
+}
+
+// ============================================
+// BOOKKEEPING & TAX TABLES
+// ============================================
+
+model PaymentMethod {
+  id          String   @id @default(cuid())
+  userId      String
+  name        String
+  type        PaymentMethodType
+  last4       String?  // Last 4 digits for cards
+  bankName    String?
+  isDefault   Boolean  @default(false)
+  isActive    Boolean  @default(true)
+  metadata    Json?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  user     User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expenses ExpensePaymentMethod[]
+
+  @@index([userId])
+  @@map("payment_methods")
+}
+
+model ExpensePaymentMethod {
+  id              String   @id @default(cuid())
+  expenseId       String
+  paymentMethodId String
+  amount          Decimal  @db.Decimal(15, 2)
+  createdAt       DateTime @default(now())
+
+  // Relations
+  expense       Expense       @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+  paymentMethod PaymentMethod @relation(fields: [paymentMethodId], references: [id])
+
+  @@unique([expenseId, paymentMethodId])
+  @@map("expense_payment_methods")
+}
+
+model TaxCategory {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  nameTh      String?
+  description String?
+  deductible  Boolean  @default(false)
+  maxDeduction Decimal? @db.Decimal(15, 2)
+  taxYear     Int?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  // Relations
+  classifications ExpenseTaxClassification[]
+  categoryMappings CategoryTaxMapping[]
+
+  @@map("tax_categories")
+}
+
+model CategoryTaxMapping {
+  id            String   @id @default(cuid())
+  categoryId    String
+  taxCategoryId String
+  createdAt     DateTime @default(now())
+
+  // Relations
+  category    Category    @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  taxCategory TaxCategory @relation(fields: [taxCategoryId], references: [id], onDelete: Cascade)
+
+  @@unique([categoryId, taxCategoryId])
+  @@map("category_tax_mappings")
+}
+
+model ExpenseTaxClassification {
+  id            String   @id @default(cuid())
+  expenseId     String
+  taxCategoryId String
+  userId        String
+  amount        Decimal  @db.Decimal(15, 2)
+  notes         String?
+  createdAt     DateTime @default(now())
+
+  // Relations
+  expense     Expense     @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+  taxCategory TaxCategory @relation(fields: [taxCategoryId], references: [id])
+  user        User        @relation(fields: [userId], references: [id])
+
+  @@unique([expenseId, taxCategoryId, userId])
+  @@index([userId])
+  @@index([taxCategoryId])
+  @@map("expense_tax_classifications")
+}
+
+model BookkeepingReport {
+  id         String   @id @default(cuid())
+  userId     String
+  sourceId   String?
+  reportType String   // tax_summary, monthly_ledger, payment_analysis
+  year       Int
+  month      Int?
+  data       Json
+  generatedAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([reportType])
+  @@map("bookkeeping_reports")
+}
+
+// ============================================
+// SUMMARY / CACHE TABLES
+// ============================================
+
+model UserSummary {
+  id         String       @id @default(cuid())
+  userId     String
+  sourceId   String?
+  period     SummaryPeriod
+  periodStart DateTime
+  currency   String       @default("THB")
+
+  totalSpent    Decimal @db.Decimal(15, 2) @default(0)
+  totalReceived Decimal @db.Decimal(15, 2) @default(0)
+  totalOwed     Decimal @db.Decimal(15, 2) @default(0)
+  totalOwing    Decimal @db.Decimal(15, 2) @default(0)
+
+  categoryBreakdown Json?
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, sourceId, period, periodStart, currency])
+  @@index([userId])
+  @@index([periodStart])
+  @@map("user_summaries")
+}
+
+// ============================================
+// ENUMS
+// ============================================
+
+enum Channel {
+  LINE
+  WHATSAPP
+  TELEGRAM
+  DISCORD
+  WEB
+}
+
+enum SourceType {
+  DM
+  GROUP
+}
+
+enum MemberRole {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+enum BudgetPeriod {
+  DAILY
+  WEEKLY
+  MONTHLY
+  YEARLY
+}
+
+enum SummaryPeriod {
+  DAILY
+  WEEKLY
+  MONTHLY
+  YEARLY
+}
+
+enum PaymentMethodType {
+  CASH
+  CREDIT_CARD
+  DEBIT_CARD
+  BANK_TRANSFER
+  PROMPTPAY
+  EWALLET
+  OTHER
+}
