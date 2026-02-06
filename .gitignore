@@ -70,3 +70,5 @@ USER.md
 
 # local tooling
 .serena/
+
+billog-agent/data/*
