@@ -43,7 +43,6 @@
     "@voltagent/core": "^2.3.1",
     "@voltagent/postgres": "^2.0.3",
     "ai": "^6.0.0",
-    "baileys": "^6.7.16",
     "bullmq": "^5.67.2",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.14.1",

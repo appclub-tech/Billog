@@ -152,7 +152,7 @@ This data enables future insights:
 | AI | VoltAgent + OpenAI GPT-4o |
 | Database | PostgreSQL + Prisma |
 | Queue | BullMQ + Redis |
-| Channels | WhatsApp (Baileys), LINE |
+| Channels | WhatsApp, LINE |
 
 ---
 
