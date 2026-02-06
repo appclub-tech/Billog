@@ -1,46 +1,122 @@
 services:
-  openclaw-gateway:
-    image: ${OPENCLAW_IMAGE:-openclaw:local}
+  # ===========================================
+  # Billog Agent (Mastra AI Bookkeeper)
+  # Handles LINE/WhatsApp webhooks and AI processing
+  # ===========================================
+  billog-agent:
+    build:
+      context: ./billog-agent
+      dockerfile: Dockerfile
     environment:
-      HOME: /home/node
-      TERM: xterm-256color
-      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN}
-      CLAUDE_AI_SESSION_KEY: ${CLAUDE_AI_SESSION_KEY}
-      CLAUDE_WEB_SESSION_KEY: ${CLAUDE_WEB_SESSION_KEY}
-      CLAUDE_WEB_COOKIE: ${CLAUDE_WEB_COOKIE}
+      NODE_ENV: production
+      PORT: 3000
+      # AI Provider (OpenAI for Mastra)
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      # Google Gemini for OCR
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY}
+      # Billog API connection (internal)
+      BILLOG_API_URL: http://billog-api:8000
+      BILLOG_JWT_SECRET: ${BILLOG_JWT_SECRET:-billog-jwt-secret-2024}
+      # LINE Channel
+      LINE_CHANNEL_ACCESS_TOKEN: ${LINE_CHANNEL_ACCESS_TOKEN}
+      LINE_CHANNEL_SECRET: ${LINE_CHANNEL_SECRET}
+      # Public URL for serving images
+      BASE_URL: https://billog-gateway.ngrok.app
+      UPLOADS_DIR: /app/uploads
     volumes:
-      - ${OPENCLAW_CONFIG_DIR}:/home/node/.openclaw
-      - ${OPENCLAW_WORKSPACE_DIR}:/home/node/.openclaw/workspace
+      - agent-uploads:/app/uploads
+      - ./billog-agent/data:/app/data
     ports:
-      - "${OPENCLAW_GATEWAY_PORT:-18789}:18789"
-      - "${OPENCLAW_BRIDGE_PORT:-18790}:18790"
-    init: true
+      - "${BILLOG_AGENT_PORT:-3000}:3000"
+    restart: unless-stopped
+    depends_on:
+      billog-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - billog-network
+
+  # ===========================================
+  # ngrok Tunnel for Gateway (LINE webhooks)
+  # ===========================================
+  ngrok-gateway:
+    image: ngrok/ngrok:latest
     restart: unless-stopped
     command:
-      [
-        "node",
-        "dist/index.js",
-        "gateway",
-        "--bind",
-        "${OPENCLAW_GATEWAY_BIND:-lan}",
-        "--port",
-        "18789",
-      ]
-
-  openclaw-cli:
-    image: ${OPENCLAW_IMAGE:-openclaw:local}
+      - "http"
+      - "--domain=billog-gateway.ngrok.app"
+      - "billog-agent:3000"
     environment:
-      HOME: /home/node
-      TERM: xterm-256color
-      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN}
-      BROWSER: echo
-      CLAUDE_AI_SESSION_KEY: ${CLAUDE_AI_SESSION_KEY}
-      CLAUDE_WEB_SESSION_KEY: ${CLAUDE_WEB_SESSION_KEY}
-      CLAUDE_WEB_COOKIE: ${CLAUDE_WEB_COOKIE}
+      - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN}
+    ports:
+      - "4040:4040"
+    depends_on:
+      billog-agent:
+        condition: service_healthy
+    networks:
+      - billog-network
+
+  # ===========================================
+  # Billog API (NestJS Backend)
+  # Uses Neon PostgreSQL + Upstash Redis (cloud)
+  # ===========================================
+  billog-api:
+    build:
+      context: ./billog-api
+      dockerfile: Dockerfile
+    env_file:
+      - ./billog-api/.env
+    environment:
+      NODE_ENV: production
+      PORT: 8000
+      BILLOG_JWT_SECRET: ${BILLOG_JWT_SECRET:-billog-jwt-secret-2024}
     volumes:
-      - ${OPENCLAW_CONFIG_DIR}:/home/node/.openclaw
-      - ${OPENCLAW_WORKSPACE_DIR}:/home/node/.openclaw/workspace
-    stdin_open: true
-    tty: true
-    init: true
-    entrypoint: ["node", "dist/index.js"]
+      - api-data:/app/data
+    ports:
+      - "${BILLOG_API_PORT:-8000}:8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - billog-network
+
+  # ===========================================
+  # ngrok Tunnel for API (optional, for testing)
+  # ===========================================
+  ngrok-api:
+    image: ngrok/ngrok:latest
+    restart: unless-stopped
+    command:
+      - "http"
+      - "--domain=billog-api.ngrok.app"
+      - "billog-api:8000"
+    environment:
+      - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN}
+    ports:
+      - "4041:4040"
+    depends_on:
+      billog-api:
+        condition: service_healthy
+    networks:
+      - billog-network
+    profiles:
+      - api-public  # Only starts with: docker compose --profile api-public up
+
+networks:
+  billog-network:
+    driver: bridge
+
+volumes:
+  agent-uploads:
+    driver: local
+  api-data:
+    driver: local

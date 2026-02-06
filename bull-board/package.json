@@ -1,0 +1,14 @@
+{
+  "name": "billog-bull-board",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@bull-board/api": "^6.16.4",
+    "@bull-board/express": "^6.16.4",
+    "bullmq": "^5.67.2",
+    "express": "^5.0.0"
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "name": "billog-agent",
+  "version": "1.0.0",
+  "description": "AI Bookkeeper Agent built with Mastra",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx --watch src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "mastra:dev": "mastra dev",
+    "mastra:build": "mastra build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "vitest run tests/e2e/",
+    "test:scorers": "vitest run tests/scorers/",
+    "test:unit": "vitest run tests/scorers/run-evals.test.ts --testNamePattern='Scorer Unit'"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.21.0",
+    "@hono/node-server": "^1.13.0",
+    "@mastra/core": "latest",
+    "@mastra/evals": "latest",
+    "@mastra/hono": "latest",
+    "@mastra/memory": "latest",
+    "@mastra/libsql": "latest",
+    "@whiskeysockets/baileys": "^6.7.16",
+    "dotenv": "^16.4.0",
+    "hono": "^4.0.0",
+    "jsonwebtoken": "^9.0.2",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/jsonwebtoken": "^9.0.9",
+    "@types/node": "^22.0.0",
+    "mastra": "latest",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

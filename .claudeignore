@@ -1,0 +1,49 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+build/
+.next/
+.turbo/
+.mastra/
+
+# Lock files (large, not useful to read)
+pnpm-lock.yaml
+package-lock.json
+yarn.lock
+
+# Docker volumes and data
+data/
+uploads/
+.docker/
+
+# IDE and OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# Test coverage
+coverage/
+
+# Generated files
+*.generated.ts
+*.generated.js
+prisma/migrations/
+
+# Large binary files
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.ico
+*.woff
+*.woff2
+*.ttf
+*.eot

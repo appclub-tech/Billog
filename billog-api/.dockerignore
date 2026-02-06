@@ -1,0 +1,46 @@
+# Dependencies
+node_modules
+
+# Build output
+dist
+tsconfig.tsbuildinfo
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git
+.git
+.gitignore
+
+# Tests
+tests
+*.test.ts
+*.spec.ts
+coverage
+vitest.config.ts
+
+# Documentation
+*.md
+!README.md
+
+# Docker
+Dockerfile*
+docker-compose*
+.dockerignore
+
+# Misc
+.eslintcache
+*.log
+npm-debug.log*
