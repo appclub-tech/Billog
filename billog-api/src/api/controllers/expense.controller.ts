@@ -212,46 +212,83 @@ export class ExpenseController {
       this.log(reqId, step, 'Receipt created', { receiptId: receipt.id });
     }
 
-    // 6b. Auto-link payment method if payment info is in metadata
+    // 6b. Link payment method - use from receipt or default to Cash
     let linkedPaymentMethod: string | null = null;
-    this.log(reqId, ++step, 'Checking for payment info...', {
+    this.log(reqId, ++step, 'Linking payment method...', {
       hasMetadata: !!dto.metadata,
       metadataKeys: dto.metadata ? Object.keys(dto.metadata) : [],
     });
+
+    // Try to get payment info from metadata (receipt OCR)
+    let paymentMethodId: string | null = null;
 
     if (dto.metadata && typeof dto.metadata === 'object') {
       const metadata = dto.metadata as Record<string, unknown>;
       const paymentInfo = metadata.payment as PaymentInfo | undefined;
 
-      this.log(reqId, step, 'Payment info extracted', {
+      this.log(reqId, step, 'Payment info from receipt', {
         hasPaymentInfo: !!paymentInfo,
         paymentInfo: paymentInfo || 'null',
       });
 
       if (paymentInfo && paymentInfo.method) {
-        this.log(reqId, step, 'Processing payment method...', {
+        this.log(reqId, step, 'Processing receipt payment method...', {
           method: paymentInfo.method,
           cardType: paymentInfo.cardType,
           last4: paymentInfo.cardLast4,
         });
 
-        const paymentMethodId = await this.paymentMethodService.findOrCreateFromPaymentInfo(
+        paymentMethodId = await this.paymentMethodService.findOrCreateFromPaymentInfo(
           payer.id,
           paymentInfo,
         );
-
-        if (paymentMethodId) {
-          await this.paymentMethodService.linkToExpense(
-            expense.id,
-            paymentMethodId,
-            dto.amount,
-          );
-          linkedPaymentMethod = paymentMethodId;
-          this.log(reqId, step, 'Payment method linked', { paymentMethodId });
-        } else {
-          this.log(reqId, step, 'Payment method not created (unknown type)', { method: paymentInfo.method });
-        }
       }
+    }
+
+    // If no payment method from receipt, use user's default (Cash)
+    if (!paymentMethodId) {
+      this.log(reqId, step, 'No receipt payment info, using default payment method...');
+
+      const defaultPaymentMethod = await this.prisma.paymentMethod.findFirst({
+        where: {
+          userId: payer.id,
+          isDefault: true,
+          isActive: true,
+        },
+      });
+
+      if (defaultPaymentMethod) {
+        paymentMethodId = defaultPaymentMethod.id;
+        this.log(reqId, step, 'Using default payment method', {
+          id: defaultPaymentMethod.id,
+          name: defaultPaymentMethod.name,
+          type: defaultPaymentMethod.type,
+        });
+      } else {
+        // Create default Cash if doesn't exist (legacy users)
+        this.log(reqId, step, 'Creating default Cash payment method for legacy user...');
+        const newCash = await this.prisma.paymentMethod.create({
+          data: {
+            userId: payer.id,
+            name: 'Cash',
+            type: 'CASH',
+            isDefault: true,
+          },
+        });
+        paymentMethodId = newCash.id;
+        this.log(reqId, step, 'Created default Cash', { id: newCash.id });
+      }
+    }
+
+    // Link payment method to expense
+    if (paymentMethodId) {
+      await this.paymentMethodService.linkToExpense(
+        expense.id,
+        paymentMethodId,
+        dto.amount,
+      );
+      linkedPaymentMethod = paymentMethodId;
+      this.log(reqId, step, 'Payment method linked', { paymentMethodId });
     }
 
     // 7. Calculate and create splits

@@ -24,8 +24,8 @@ import {
   setNicknameTool,
   listCategoriesTool,
   getCategoryByNameTool,
-  extractReceiptTool,
-  extractRawTextTool,
+  processReceiptTool,
+  processTextExpenseTool,
   getUserPreferencesTool,
   setUserLanguageTool,
 } from '../tools/index.js';
@@ -102,35 +102,31 @@ Example:
 
 ## Expense Recording
 
-When user reports spending:
-1. Extract: description, amount, currency (default THB)
-2. Use get-category-by-name tool to find the categoryId (Food, Transport, etc.)
-3. Check for split targets (@all, @name)
-4. Call create-expense tool with categoryId and userLanguage (th or en based on RESPONSE LANGUAGE section)
-5. Return confirmation with expense ID
-
-Note: Context fields are auto-injected - focus on business parameters only.
-
-Category mapping:
-- Food: coffee, lunch, dinner, restaurant, meal, snack
-- Transport: taxi, grab, bts, mrt, gas, uber
-- Groceries: 7-11, big c, lotus, supermarket
-- Shopping: clothes, lazada, shopee
-- Entertainment: movie, game, netflix
-- Health: medicine, hospital, pharmacy
-- Other: anything else (DEFAULT - use when unsure or category not found)
-
-**IMPORTANT**: If unsure about category or getCategoryByName fails, always use "Other" category.
+When user sends a TEXT message to record spending:
+1. Call process-text-expense tool with the text
+2. The tool parses, validates, and creates the expense in one step
+3. If missing info (e.g., no amount), tool will return questions to ask user
+4. Return the confirmation with EX:{expenseId}
 
 Examples:
-- "coffee 65" → getCategoryByName("Food"), then createExpense with categoryId
-- "lunch 600 @all" → Food category, equal split
-- "grab home 120" → Transport category
-- "random stuff 50" → Other category (unsure)
+- "coffee 65" → process-text-expense → EX:xxx
+- "lunch 600 @all" → process-text-expense (handles split) → EX:xxx
+- "fuel $80 today" → process-text-expense (detects USD, date) → EX:xxx
+- "50" → process-text-expense → asks "What did you buy?"
+
+⚠️ Use process-text-expense for TEXT messages.
+⚠️ Use process-receipt for RECEIPT IMAGES.
 
 ## Receipt Processing
 
-See **billog-bookkeeper** skill for receipt workflow and response format.
+When user sends a receipt image:
+1. Call process-receipt tool with the imageUrl
+2. The tool does OCR + creates expense in ONE step
+3. Only respond AFTER getting expenseId from the tool
+4. Include EX:{expenseId} in your response
+
+⚠️ CRITICAL: Use process-receipt (not extract-receipt) for receipts.
+process-receipt handles everything - OCR, expense creation, payment method linking.
 
 ## Bill Splitting
 
@@ -248,8 +244,10 @@ export const billogAgent = new Agent({
   memory: billogMemory,
   workspace: billogWorkspace,
   tools: {
-    // Expense tools
-    createExpense: createExpenseTool,
+    // Primary expense tools (use these for recording)
+    processTextExpense: processTextExpenseTool,  // For text messages
+    processReceipt: processReceiptTool,          // For receipt images
+    // Query/manage expense tools
     getExpenses: getExpensesTool,
     getExpenseById: getExpenseByIdTool,
     deleteExpense: deleteExpenseTool,
@@ -265,14 +263,13 @@ export const billogAgent = new Agent({
     initSource: initSourceTool,
     syncMembers: syncMembersTool,
     setNickname: setNicknameTool,
-    // Category tools
+    // Category tools (for queries)
     listCategories: listCategoriesTool,
     getCategoryByName: getCategoryByNameTool,
-    // OCR tools
-    extractReceipt: extractReceiptTool,
-    extractRawText: extractRawTextTool,
     // User preference tools
     getUserPreferences: getUserPreferencesTool,
     setUserLanguage: setUserLanguageTool,
+    // Legacy (kept for compatibility)
+    createExpense: createExpenseTool,
   },
 });

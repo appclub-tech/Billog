@@ -22,12 +22,7 @@ EX:{expenseId}
 ```
 
 ### Receipt Confirmation
-**Tools: extract-receipt → create-expense (two steps, both required)**
-
-1. **extract-receipt**: OCR only - extracts data from image (NOTHING SAVED to database)
-2. **create-expense**: Saves Expense + Receipt records (pass receiptData from step 1)
-
-Only respond "recorded" AFTER create-expense succeeds with EX:{expenseId}.
+**Tool: process-receipt (ONE step - does OCR + saves expense)**
 
 ```
 {storeName} | {currency}{total}
@@ -40,43 +35,29 @@ Only respond "recorded" AFTER create-expense succeeds with EX:{expenseId}.
 EX:{expenseId}  ← Required! Confirms record was saved
 ```
 
-## Receipt Workflow (MANDATORY)
+## Receipt Workflow (SIMPLE)
 
-⚠️ **CRITICAL**: Follow this workflow EXACTLY for receipt images.
+⚠️ **Use process-receipt tool** - it handles everything in ONE call.
 
-### Step 1: Extract Receipt Data (OCR Only)
+### How It Works
 ```
-extract-receipt(imageUrl) → Returns OCR data
+process-receipt(imageUrl) → Returns expenseId + formatted message
 ```
-- This ONLY extracts text from the image
-- **NOTHING is saved to the database**
-- Returns: storeName, items[], total, tax, payment, etc.
-
-### Step 2: Create Expense Record (Saves to Database)
-```
-create-expense({
-  description: storeName,
-  amount: total,
-  items: items[],
-  receiptData: { imageUrl, storeName, total, tax, subtotal }
-}) → Returns expenseId
-```
-- This SAVES the expense, items, and receipt to the database
-- **MUST verify response contains `expenseId`**
-
-### Step 3: Verify and Respond
-- Check that `create-expense` returned `success: true` AND `expenseId`
-- Only THEN format confirmation with EX:{expenseId}
+- Does OCR (extracts text from image)
+- Creates expense record
+- Links payment method
+- Creates receipt record
+- Returns expenseId when successful
 
 ### ❌ NEVER Do This
 - Say "recorded" or "บันทึกแล้ว" without EX:{expenseId}
-- Format OCR data as a confirmation (that's just displaying data, not saving)
-- Skip the create-expense step after extract-receipt
+- Respond before process-receipt returns
 
 ### ✅ Always Do This
-- Call create-expense AFTER extract-receipt
-- Include EX:{expenseId} in EVERY expense confirmation
-- If create-expense fails, tell user the error (don't pretend it worked)
+- Call process-receipt with the imageUrl
+- Wait for the tool to return
+- Include EX:{expenseId} from tool response
+- If tool returns error, tell user the error (don't pretend it worked)
 
 ### With Splits
 ```

@@ -21,7 +21,7 @@ services:
       LINE_CHANNEL_ACCESS_TOKEN: ${LINE_CHANNEL_ACCESS_TOKEN}
       LINE_CHANNEL_SECRET: ${LINE_CHANNEL_SECRET}
       # Public URL for serving images
-      BASE_URL: https://billog-gateway.ngrok.app
+      BASE_URL: https://billoggateway.ngrok.app
       UPLOADS_DIR: /app/uploads
     volumes:
       - agent-uploads:/app/uploads
@@ -49,7 +49,7 @@ services:
     restart: unless-stopped
     command:
       - "http"
-      - "--domain=billog-gateway.ngrok.app"
+      - "--domain=billoggateway.ngrok.app"
       - "billog-agent:3000"
     environment:
       - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN}

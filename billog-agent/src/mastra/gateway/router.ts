@@ -402,8 +402,8 @@ export class GatewayRouter {
     // Include imageUrl in context so agent can pass it to OCR tool
     if (message.imageBase64 || message.imageUrl) {
       const imageInstruction = message.imageUrl
-        ? `\n\n[Receipt image attached - ImageURL: ${message.imageUrl}]\nUse extract-receipt tool with imageUrl="${message.imageUrl}" to process this receipt.`
-        : '\n\n[Receipt image attached - please extract items and amounts]';
+        ? `\n\n[Receipt image attached - ImageURL: ${message.imageUrl}]\nUse process-receipt tool with imageUrl="${message.imageUrl}" to process this receipt and save the expense.`
+        : '\n\n[Receipt image attached - please process and record the expense]';
 
       console.log(`[GATEWAY] 🖼️ Including image in multi-modal message`);
       if (message.imageUrl) {

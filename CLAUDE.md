@@ -28,7 +28,7 @@ LINE/WhatsApp
     ▼
 ┌─────────────────────────────────────────────────┐
 │ Billog Agent (Mastra)                           │
-│ https://billog-gateway.ngrok.app                │
+│ https://billoggateway.ngrok.app                │
 │                                                 │
 │ ┌─────────────┐    ┌──────────────────────────┐ │
 │ │ Gateway     │───►│ Billog Agent (GPT-4o)    │ │
@@ -134,10 +134,10 @@ pnpm --filter billog-agent exec tsc --noEmit
 
 | Service | URL |
 |---------|-----|
-| Billog Gateway | https://billog-gateway.ngrok.app |
+| Billog Gateway | https://billoggateway.ngrok.app |
 | Billog API | https://billog-api.ngrok.app (optional) |
-| LINE Webhook | https://billog-gateway.ngrok.app/webhook/line |
-| Health Check | https://billog-gateway.ngrok.app/health |
+| LINE Webhook | https://billoggateway.ngrok.app/webhook/line |
+| Health Check | https://billoggateway.ngrok.app/health |
 
 ## Thai Language Support
 

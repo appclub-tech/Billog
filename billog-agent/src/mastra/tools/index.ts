@@ -37,11 +37,17 @@ export {
   getCategoryByNameTool,
 } from './category.tool.js';
 
-// OCR tools
+// OCR tools (legacy - prefer processReceiptTool)
 export {
   extractReceiptTool,
   extractRawTextTool,
 } from './ocr.tool.js';
+
+// Receipt processing (combined OCR + create expense)
+export { processReceiptTool } from './receipt.tool.js';
+
+// Text expense processing (parse + validate + create)
+export { processTextExpenseTool } from './text-expense.tool.js';
 
 // User tools
 export {
