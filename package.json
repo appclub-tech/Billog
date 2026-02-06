@@ -1,0 +1,7 @@
+{
+  "name": "billog",
+  "private": true,
+  "scripts": {
+    "setup": "./scripts/setup-env.sh"
+  }
+}
