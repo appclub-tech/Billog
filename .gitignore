@@ -72,3 +72,5 @@ USER.md
 .serena/
 
 billog-agent/data/*
+*.db-shm
+*.db-wal
