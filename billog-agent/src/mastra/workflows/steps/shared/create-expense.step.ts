@@ -8,6 +8,7 @@
 import { createStep } from '@mastra/core/workflows';
 import { z } from 'zod';
 import { apiRequest, type ApiContext } from '../../../tools/api-client.js';
+import { saveExpenseItemEmbeddings, isVectorStoreConfigured } from '../../../vector/index.js';
 import {
   MessageWorkflowStateSchema,
   ParsedExpenseSchema,
@@ -130,6 +131,34 @@ export const createExpenseStep = createStep({
       }
 
       console.log(`[create-expense] ✅ SUCCESS: EX:${response.expense.id}`);
+
+      // Save embeddings for Insights Agent (non-blocking)
+      if (isVectorStoreConfigured()) {
+        const embeddingDate = response.expense.date || new Date().toISOString();
+        const items = parsedExpense.items && parsedExpense.items.length > 0
+          ? parsedExpense.items.map(item => ({
+              name: item.name,
+              nameLocalized: item.nameLocalized || undefined,
+              quantity: item.quantity || 1,
+              unitPrice: item.unitPrice,
+              totalPrice: (item.quantity || 1) * item.unitPrice,
+            }))
+          : [{
+              // Use response data which is guaranteed to exist
+              name: response.expense.description,
+              quantity: 1,
+              unitPrice: response.expense.amount,
+              totalPrice: response.expense.amount,
+            }];
+
+        saveExpenseItemEmbeddings(
+          response.expense.id,
+          items,
+          sourceChannelId,
+          embeddingDate,
+          senderChannelId // Who paid
+        ).catch((err) => console.error('[Vector] Embedding save error:', err));
+      }
 
       setState({
         ...state,

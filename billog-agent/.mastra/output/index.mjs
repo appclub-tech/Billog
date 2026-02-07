@@ -24,6 +24,7 @@ import z$1, { z, ZodObject, ZodFirstPartyTypeKind as ZodFirstPartyTypeKind$1 } f
 import { apiRequest, CATEGORIES, formatAmount } from './tools/5aaadd57-6742-4f80-91d8-d525c91493b6.mjs';
 import { parseExpenseText, validateParsedExpense, generateMissingFieldsPrompt } from './tools/285fa223-6376-40b1-a3e9-6d273fe28d8a.mjs';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import { i as isVectorStoreConfigured, a as saveExpenseItemEmbeddings } from './expense-item-vector.mjs';
 import { readdir, readFile, mkdtemp, rm, writeFile, mkdir, copyFile, stat } from 'fs/promises';
 import * as https from 'https';
 import { createServer } from 'http';
@@ -52,9 +53,8 @@ import { tmpdir } from 'os';
 import { MastraServerBase } from '@mastra/core/server';
 import { Buffer as Buffer$1 } from 'buffer';
 import { tools } from './tools.mjs';
-import './expense-item-vector.mjs';
-import '@upstash/vector';
 import 'jsonwebtoken';
+import '@upstash/vector';
 
 const __filename$2 = fileURLToPath(import.meta.url);
 const __dirname$2 = path.dirname(__filename$2);
@@ -1038,6 +1038,30 @@ ${"=".repeat(60)}`);
         };
       }
       console.log(`[create-expense] \u2705 SUCCESS: EX:${response.expense.id}`);
+      if (isVectorStoreConfigured()) {
+        const embeddingDate = response.expense.date || (/* @__PURE__ */ new Date()).toISOString();
+        const items = parsedExpense.items && parsedExpense.items.length > 0 ? parsedExpense.items.map((item) => ({
+          name: item.name,
+          nameLocalized: item.nameLocalized || void 0,
+          quantity: item.quantity || 1,
+          unitPrice: item.unitPrice,
+          totalPrice: (item.quantity || 1) * item.unitPrice
+        })) : [{
+          // Use response data which is guaranteed to exist
+          name: response.expense.description,
+          quantity: 1,
+          unitPrice: response.expense.amount,
+          totalPrice: response.expense.amount
+        }];
+        saveExpenseItemEmbeddings(
+          response.expense.id,
+          items,
+          sourceChannelId,
+          embeddingDate,
+          senderChannelId
+          // Who paid
+        ).catch((err) => console.error("[Vector] Embedding save error:", err));
+      }
       setState({
         ...state,
         expenseId: response.expense.id
