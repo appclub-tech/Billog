@@ -13,7 +13,9 @@
     "test:watch": "vitest",
     "test:e2e": "vitest run tests/e2e/",
     "test:scorers": "vitest run tests/scorers/",
-    "test:unit": "vitest run tests/scorers/run-evals.test.ts --testNamePattern='Scorer Unit'"
+    "test:evals": "vitest run tests/scorers/business-evals.test.ts",
+    "test:evals:full": "vitest run tests/scorers/business-evals.test.ts --testNamePattern='Comprehensive'",
+    "test:unit": "vitest run tests/unit/"
   },
   "dependencies": {
     "@google/generative-ai": "^0.21.0",

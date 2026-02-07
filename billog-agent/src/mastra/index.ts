@@ -2,6 +2,7 @@ import { Mastra } from '@mastra/core';
 import { LibSQLStore } from '@mastra/libsql';
 import { billogAgent } from './agents/billog.agent.js';
 import { createGateway, type GatewayConfig } from './gateway/index.js';
+import { messageWorkflow } from './workflows/index.js';
 
 // ===========================================
 // Configuration
@@ -59,9 +60,17 @@ export async function ensureGatewayInitialized(mastra: Mastra): Promise<void> {
 // Storage Configuration
 // ===========================================
 
+/**
+ * Storage for Mastra core domains:
+ * - workflows: suspended workflow state (HITL)
+ * - scores: evaluation results
+ * - observability: traces and spans
+ *
+ * Note: Agent memory uses separate storage (see billog.agent.ts)
+ */
 const storage = new LibSQLStore({
-  id: 'billog-storage',
-  url: process.env.DATABASE_URL || 'file:./data/mastra.db',
+  id: 'billog-mastra',
+  url: process.env.MASTRA_DATABASE_URL || 'file:./data/mastra.db',
 });
 
 // ===========================================
@@ -71,6 +80,9 @@ const storage = new LibSQLStore({
 export const mastra = new Mastra({
   agents: {
     billog: billogAgent,
+  },
+  workflows: {
+    messageWorkflow,
   },
   storage,
 });
@@ -82,4 +94,7 @@ export const mastra = new Mastra({
 export { billogAgent };
 export { UPLOADS_DIR, BASE_URL };
 export * from './tools/index.js';
-export * from './gateway/index.js';
+export { createGateway, GatewayRouter } from './gateway/index.js';
+export type { GatewayConfig, InboundMessage, OutboundResponse, AgentContext } from './gateway/index.js';
+export { messageWorkflow, dmWorkflow, groupWorkflow, shouldUseWorkflow } from './workflows/index.js';
+export type { MessageInput, MessageOutput, MessageWorkflowState, ParsedExpense } from './workflows/index.js';

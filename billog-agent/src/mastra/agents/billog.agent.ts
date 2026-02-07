@@ -1,8 +1,10 @@
 import { Agent } from '@mastra/core/agent';
 import { Memory } from '@mastra/memory';
-import { LibSQLStore } from '@mastra/libsql';
+import { LibSQLStore, LibSQLVector } from '@mastra/libsql';
 import { Workspace, LocalFilesystem } from '@mastra/core/workspace';
 import type { RequestContext } from '@mastra/core/request-context';
+import { UnicodeNormalizer, TokenLimiterProcessor } from '@mastra/core/processors';
+import { ModelRouterEmbeddingModel } from '@mastra/core/llm';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -191,18 +193,84 @@ function getBillogInstructions({ requestContext }: { requestContext?: RequestCon
 }
 
 /**
- * Memory configuration for conversation persistence
- * - Uses LibSQLStore for persistent storage across container restarts
- * - lastMessages: Number of recent messages to include in context (reduced for speed)
+ * Memory configuration for Billog
+ *
+ * Optimized for expense tracking workflow:
+ * - Users send quick messages ("coffee 65") or receipts, then go
+ * - Minimal message history needed (3 messages = expense + confirmation + follow-up)
+ * - Semantic recall for "same as last time" or "lunch again" patterns
+ * - Working memory for persistent user preferences
+ *
+ * LibSQLStore is a MastraCompositeStore with domains:
+ * - memory: threads, messages, resources, working memory
+ * - workflows: suspended workflow state (for HITL)
  */
 const billogMemory = new Memory({
+  // Composite storage for memory domain
   storage: new LibSQLStore({
     id: 'billog-memory',
-    url: 'file:./data/agent-memory.db',
+    url: process.env.MEMORY_DATABASE_URL || 'file:./data/agent-memory.db',
   }),
+  // Vector store for semantic recall (same DB, different tables)
+  vector: new LibSQLVector({
+    id: 'billog-vector',
+    url: process.env.MEMORY_DATABASE_URL || 'file:./data/agent-memory.db',
+  }),
+  // Embedder for semantic search (uses OPENAI_API_KEY)
+  embedder: new ModelRouterEmbeddingModel('openai/text-embedding-3-small'),
   options: {
-    lastMessages: 10, // Reduced from 20 for faster context loading
+    // Minimal history - expense tracking is quick in/out
+    lastMessages: 3,
+
+    // Semantic recall - for "same as yesterday" or "lunch again"
+    semanticRecall: {
+      topK: 2,           // 2 similar past expenses is enough
+      messageRange: 1,   // Minimal context around match
+      scope: 'resource', // Search across all threads for this source
+    },
+
+    // Working memory - persistent user context (compact template)
+    workingMemory: {
+      enabled: true,
+      scope: 'resource',
+      template: `# User Profile
+- **Language**:
+- **Currency**:
+- **Common Categories**:
+- **Frequent Stores**:
+
+# Group (if applicable)
+- **Usual Payer**:
+- **Split Method**:
+- **Members**:
+`,
+    },
   },
+});
+
+// ============================================
+// Processors Configuration
+// ============================================
+
+/**
+ * UnicodeNormalizer - Critical for Thai text
+ * Normalizes Unicode representations for consistent parsing.
+ * Thai text can have multiple Unicode forms that look identical.
+ */
+const unicodeNormalizer = new UnicodeNormalizer({
+  stripControlChars: true,    // Remove control chars (keep newlines, tabs)
+  preserveEmojis: true,       // Keep 📸 🍕 💰 etc for receipts
+  collapseWhitespace: true,   // Normalize spaces
+  trim: true,                 // Trim leading/trailing whitespace
+});
+
+/**
+ * TokenLimiter - Cost optimization
+ * Prevents context window overflow by limiting token count.
+ * Uses o200k_base encoding (GPT-4o compatible).
+ */
+const tokenLimiter = new TokenLimiterProcessor({
+  limit: 8000,  // Conservative limit for cost control
 });
 
 /**
@@ -234,6 +302,13 @@ function getBillogModel({ requestContext }: { requestContext: RequestContext<unk
  * AI Bookkeeper for expense tracking and bill splitting
  * Uses dynamic instructions based on user language from RequestContext
  * Uses dynamic model selection based on task complexity (~80% use gpt-4o-mini)
+ *
+ * Processors:
+ * - UnicodeNormalizer: Normalizes Thai text for consistent parsing (critical for Thai)
+ * - TokenLimiter: Controls context size for cost optimization
+ *
+ * Note: Memory class handles message history automatically.
+ * WorkingMemory/SemanticRecall can be added later with proper vector store.
  */
 export const billogAgent = new Agent({
   id: 'billog',
@@ -243,6 +318,12 @@ export const billogAgent = new Agent({
   model: getBillogModel,
   memory: billogMemory,
   workspace: billogWorkspace,
+  // Input processors run before messages reach the LLM
+  // Order matters: normalize first, then limit tokens after all context is loaded
+  inputProcessors: [
+    unicodeNormalizer,    // 1. Normalize Thai text first
+    tokenLimiter,         // 2. Limit tokens (runs after Memory adds history)
+  ],
   tools: {
     // Primary expense tools (use these for recording)
     processTextExpense: processTextExpenseTool,  // For text messages

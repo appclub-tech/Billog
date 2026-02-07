@@ -1,18 +1,19 @@
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
-import { apiRequest, formatAmount } from './68251daa-bc82-4965-8592-33499397cad4.mjs';
+import { getApiContext, apiRequest, formatAmount } from './5aaadd57-6742-4f80-91d8-d525c91493b6.mjs';
+import 'jsonwebtoken';
 
 const getBalancesTool = createTool({
   id: "get-balances",
   description: `Get group balances showing who owes whom. Use when user asks:
 - "who owes what"
 - "show balances"
-- "\u0E43\u0E04\u0E23\u0E40\u0E1B\u0E47\u0E19\u0E2B\u0E19\u0E35\u0E49\u0E43\u0E04\u0E23"
-- "check debts"`,
+- "check debts"
+- "what do I owe"`,
   inputSchema: z.object({
-    channel: z.enum(["LINE", "WHATSAPP", "TELEGRAM"]).describe("Chat channel"),
-    senderChannelId: z.string().describe("User channel ID"),
-    sourceChannelId: z.string().describe("Group/DM channel ID"),
+    channel: z.enum(["LINE", "WHATSAPP", "TELEGRAM"]).optional().describe("Chat channel (auto-injected)"),
+    senderChannelId: z.string().optional().describe("User channel ID (auto-injected)"),
+    sourceChannelId: z.string().optional().describe("Group/DM channel ID (auto-injected)"),
     currency: z.string().default("THB").describe("Currency to show balances in")
   }),
   outputSchema: z.object({
@@ -28,16 +29,15 @@ const getBalancesTool = createTool({
       net: z.number()
     })).optional()
   }),
-  execute: async (input) => {
-    const context = {
-      channel: input.channel,
-      senderChannelId: input.senderChannelId,
-      sourceChannelId: input.sourceChannelId
-    };
+  execute: async (input, ctx) => {
+    const context = getApiContext(input, ctx?.requestContext);
+    if (!context) {
+      return { success: false, message: "Error: Missing context" };
+    }
     try {
       const params = new URLSearchParams();
-      params.set("channel", input.channel);
-      params.set("sourceChannelId", input.sourceChannelId);
+      params.set("channel", context.channel);
+      params.set("sourceChannelId", context.sourceChannelId);
       params.set("currency", input.currency ?? "THB");
       const response = await apiRequest("GET", `/balances?${params}`, context);
       if (response.balances.length === 0) {
@@ -87,11 +87,11 @@ const getSpendingSummaryTool = createTool({
 - "how much did we spend this month"
 - "spending summary"
 - "what did tom spend"
-- "\u0E2A\u0E23\u0E38\u0E1B\u0E04\u0E48\u0E32\u0E43\u0E0A\u0E49\u0E08\u0E48\u0E32\u0E22"`,
+- "show expenses by category"`,
   inputSchema: z.object({
-    channel: z.enum(["LINE", "WHATSAPP", "TELEGRAM"]).describe("Chat channel"),
-    senderChannelId: z.string().describe("User channel ID"),
-    sourceChannelId: z.string().describe("Group/DM channel ID"),
+    channel: z.enum(["LINE", "WHATSAPP", "TELEGRAM"]).optional().describe("Chat channel (auto-injected)"),
+    senderChannelId: z.string().optional().describe("User channel ID (auto-injected)"),
+    sourceChannelId: z.string().optional().describe("Group/DM channel ID (auto-injected)"),
     period: z.enum(["day", "week", "month", "year"]).default("month").describe("Time period")
   }),
   outputSchema: z.object({
@@ -107,17 +107,16 @@ const getSpendingSummaryTool = createTool({
       }))
     }).optional()
   }),
-  execute: async (input) => {
-    const context = {
-      channel: input.channel,
-      senderChannelId: input.senderChannelId,
-      sourceChannelId: input.sourceChannelId
-    };
+  execute: async (input, ctx) => {
+    const context = getApiContext(input, ctx?.requestContext);
+    if (!context) {
+      return { success: false, message: "Error: Missing context" };
+    }
     try {
       const period = input.period ?? "month";
       const params = new URLSearchParams();
-      params.set("channel", input.channel);
-      params.set("sourceChannelId", input.sourceChannelId);
+      params.set("channel", context.channel);
+      params.set("sourceChannelId", context.sourceChannelId);
       params.set("period", period);
       const response = await apiRequest("GET", `/insights/summary?${params}`, context);
       if (response.count === 0) {
@@ -181,22 +180,21 @@ const getMyBalanceTool = createTool({
   description: `Get user's personal balance across all sources. Use when user asks:
 - "my balance"
 - "what do I owe"
-- "\u0E22\u0E2D\u0E14\u0E02\u0E2D\u0E07\u0E09\u0E31\u0E19"`,
+- "how much do I owe"`,
   inputSchema: z.object({
-    channel: z.enum(["LINE", "WHATSAPP", "TELEGRAM"]).describe("Chat channel"),
-    senderChannelId: z.string().describe("User channel ID"),
-    sourceChannelId: z.string().describe("Group/DM channel ID")
+    channel: z.enum(["LINE", "WHATSAPP", "TELEGRAM"]).optional().describe("Chat channel (auto-injected)"),
+    senderChannelId: z.string().optional().describe("User channel ID (auto-injected)"),
+    sourceChannelId: z.string().optional().describe("Group/DM channel ID (auto-injected)")
   }),
   outputSchema: z.object({
     success: z.boolean(),
     message: z.string()
   }),
-  execute: async (input) => {
-    const context = {
-      channel: input.channel,
-      senderChannelId: input.senderChannelId,
-      sourceChannelId: input.sourceChannelId
-    };
+  execute: async (input, ctx) => {
+    const context = getApiContext(input, ctx?.requestContext);
+    if (!context) {
+      return { success: false, message: "Error: Missing context" };
+    }
     try {
       const response = await apiRequest("GET", "/users/me", context);
       if (response.sources.length === 0) {

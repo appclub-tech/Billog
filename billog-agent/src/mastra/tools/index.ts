@@ -49,6 +49,28 @@ export { processReceiptTool } from './receipt.tool.js';
 // Text expense processing (parse + validate + create)
 export { processTextExpenseTool } from './text-expense.tool.js';
 
+// ==================================================
+// Pure tools for workflow-based processing
+// ==================================================
+
+// Pure OCR extraction (for workflow use)
+export {
+  ocrReceiptTool,
+  OcrResultSchema,
+  type OcrResult,
+} from './ocr-receipt.tool.js';
+
+// Pure text parsing (for workflow use)
+export {
+  parseTextTool,
+  parseExpenseText,
+  validateParsedExpense,
+  generateMissingFieldsPrompt,
+  ParseResultSchema,
+  type ParseResult,
+  type ParsedExpense,
+} from './parse-text.tool.js';
+
 // User tools
 export {
   getUserPreferencesTool,

@@ -1,6 +1,7 @@
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
-import { apiRequest, formatAmount } from './68251daa-bc82-4965-8592-33499397cad4.mjs';
+import { getApiContext, apiRequest, formatAmount } from './5aaadd57-6742-4f80-91d8-d525c91493b6.mjs';
+import 'jsonwebtoken';
 
 const PAYMENT_METHODS = {
   1: "Cash",
@@ -16,7 +17,7 @@ const recordSettlementTool = createTool({
 - "tom paid me 350"
 - "paid jerry 200 via promptpay"
 - "received 500 from wife"
-- "@tom \u0E08\u0E48\u0E32\u0E22\u0E41\u0E25\u0E49\u0E27 350"
+- "settled with tom"
 
 Direction:
 - "X paid me" \u2192 from=X, to=me (I received)
@@ -28,29 +29,28 @@ Direction:
     amount: z.number().min(0).describe("Amount paid"),
     currency: z.string().default("THB").describe("Currency code"),
     paymentMethod: z.number().optional().describe("Payment method: 1=Cash, 2=Bank, 3=PromptPay, 4=Card, 5=E-Wallet"),
-    // Context
-    channel: z.enum(["LINE", "WHATSAPP", "TELEGRAM"]).describe("Chat channel"),
-    senderChannelId: z.string().describe('User channel ID (used for "me")'),
-    sourceChannelId: z.string().describe("Group/DM channel ID")
+    // Context (optional - auto-injected)
+    channel: z.enum(["LINE", "WHATSAPP", "TELEGRAM"]).optional().describe("Chat channel (auto-injected)"),
+    senderChannelId: z.string().optional().describe("User channel ID (auto-injected)"),
+    sourceChannelId: z.string().optional().describe("Group/DM channel ID (auto-injected)")
   }),
   outputSchema: z.object({
     success: z.boolean(),
     message: z.string(),
     remainingBalance: z.number().optional()
   }),
-  execute: async (input) => {
-    const context = {
-      channel: input.channel,
-      senderChannelId: input.senderChannelId,
-      sourceChannelId: input.sourceChannelId
-    };
-    const fromChannelId = input.fromTarget === "me" ? input.senderChannelId : input.fromTarget;
-    const toChannelId = input.toTarget === "me" ? input.senderChannelId : input.toTarget;
+  execute: async (input, ctx) => {
+    const context = getApiContext(input, ctx?.requestContext);
+    if (!context) {
+      return { success: false, message: "Error: Missing context" };
+    }
+    const fromChannelId = input.fromTarget === "me" ? context.senderChannelId : input.fromTarget;
+    const toChannelId = input.toTarget === "me" ? context.senderChannelId : input.toTarget;
     try {
       const response = await apiRequest("POST", "/settlements", context, {
-        channel: input.channel,
-        sourceChannelId: input.sourceChannelId,
-        senderChannelId: input.senderChannelId,
+        channel: context.channel,
+        sourceChannelId: context.sourceChannelId,
+        senderChannelId: context.senderChannelId,
         fromChannelId,
         toChannelId,
         amount: input.amount,

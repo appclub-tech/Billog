@@ -1,6 +1,7 @@
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
-import { apiRequest } from './68251daa-bc82-4965-8592-33499397cad4.mjs';
+import { getApiContext, apiRequest } from './5aaadd57-6742-4f80-91d8-d525c91493b6.mjs';
+import 'jsonwebtoken';
 
 const MemberInputSchema = z.object({
   channelId: z.string().describe("User channel ID"),
@@ -14,14 +15,15 @@ const initSourceTool = createTool({
 - User explicitly asks to set up billog
 This is usually called automatically on first expense.`,
   inputSchema: z.object({
-    channel: z.enum(["LINE", "WHATSAPP", "TELEGRAM"]).describe("Chat channel"),
-    sourceChannelId: z.string().describe("Group/DM channel ID"),
     sourceType: z.enum(["GROUP", "DM"]).default("GROUP").describe("Source type"),
     sourceName: z.string().optional().describe("Group name"),
-    senderChannelId: z.string().describe("User channel ID"),
     senderDisplayName: z.string().optional().describe("User display name"),
     members: z.array(MemberInputSchema).optional().describe("Initial member list (for WhatsApp)"),
-    currency: z.string().default("THB").describe("Default currency")
+    currency: z.string().default("THB").describe("Default currency"),
+    // Context (optional - auto-injected from RequestContext)
+    channel: z.enum(["LINE", "WHATSAPP", "TELEGRAM"]).optional().describe("Chat channel (auto-injected)"),
+    senderChannelId: z.string().optional().describe("User channel ID (auto-injected)"),
+    sourceChannelId: z.string().optional().describe("Group/DM channel ID (auto-injected)")
   }),
   outputSchema: z.object({
     success: z.boolean(),
@@ -29,13 +31,12 @@ This is usually called automatically on first expense.`,
     isNewSource: z.boolean().optional(),
     isNewUser: z.boolean().optional()
   }),
-  execute: async (input) => {
-    const context = {
-      channel: input.channel,
-      senderChannelId: input.senderChannelId,
-      sourceChannelId: input.sourceChannelId,
-      sourceType: input.sourceType
-    };
+  execute: async (input, ctx) => {
+    const context = getApiContext(input, ctx?.requestContext);
+    if (!context) {
+      return { success: false, message: "Error: Missing context" };
+    }
+    context.sourceType = input.sourceType || context.sourceType;
     try {
       const response = await apiRequest("POST", "/sources/init", context, {
         channel: input.channel,
@@ -50,29 +51,29 @@ This is usually called automatically on first expense.`,
       const { source, user, isNewSource, isNewUser } = response;
       let message;
       if (isNewSource) {
-        message = `\u2705 \u0E01\u0E25\u0E38\u0E48\u0E21\u0E1E\u0E23\u0E49\u0E2D\u0E21\u0E43\u0E0A\u0E49\u0E07\u0E32\u0E19\u0E41\u0E25\u0E49\u0E27!
+        message = `Group ready!
 `;
         message += `   Source: ${source.name}
 `;
-        message += `   \u0E2A\u0E21\u0E32\u0E0A\u0E34\u0E01: ${source.memberCount} \u0E04\u0E19
+        message += `   Members: ${source.memberCount}
 
 `;
-        message += `   \u0E1E\u0E34\u0E21\u0E1E\u0E4C "\u0E0A\u0E48\u0E27\u0E22\u0E14\u0E49\u0E27\u0E22" \u0E2B\u0E23\u0E37\u0E2D "help" \u0E40\u0E1E\u0E37\u0E48\u0E2D\u0E14\u0E39\u0E04\u0E33\u0E2A\u0E31\u0E48\u0E07`;
+        message += `   Type "help" to see commands`;
       } else if (isNewUser) {
-        message = `\u2705 \u0E25\u0E07\u0E17\u0E30\u0E40\u0E1A\u0E35\u0E22\u0E19\u0E2A\u0E33\u0E40\u0E23\u0E47\u0E08!
+        message = `Registered!
 `;
-        message += `   \u0E0A\u0E37\u0E48\u0E2D: ${user.name}
+        message += `   Name: ${user.name}
 `;
         if (user.nickname) {
-          message += `   \u0E23\u0E2B\u0E31\u0E2A: @${user.nickname}
+          message += `   Nickname: @${user.nickname}
 `;
         }
         message += `
-   \u0E40\u0E23\u0E34\u0E48\u0E21\u0E1A\u0E31\u0E19\u0E17\u0E36\u0E01\u0E04\u0E48\u0E32\u0E43\u0E0A\u0E49\u0E08\u0E48\u0E32\u0E22\u0E44\u0E14\u0E49\u0E40\u0E25\u0E22 \u0E40\u0E0A\u0E48\u0E19 "\u0E01\u0E32\u0E41\u0E1F 65"`;
+   Start recording expenses, e.g. "coffee 65"`;
       } else {
-        message = `\u2705 \u0E1E\u0E23\u0E49\u0E2D\u0E21\u0E43\u0E0A\u0E49\u0E07\u0E32\u0E19\u0E41\u0E25\u0E49\u0E27
+        message = `Ready
 `;
-        message += `   Source: ${source.name} (${source.memberCount} \u0E04\u0E19)`;
+        message += `   Source: ${source.name} (${source.memberCount} members)`;
       }
       return {
         success: true,
@@ -92,10 +93,11 @@ const syncMembersTool = createTool({
   id: "sync-members",
   description: `Sync group members with the API. Use for WhatsApp/Telegram groups to update @all targeting.`,
   inputSchema: z.object({
-    channel: z.enum(["LINE", "WHATSAPP", "TELEGRAM"]).describe("Chat channel"),
-    senderChannelId: z.string().describe("User channel ID"),
-    sourceChannelId: z.string().describe("Group channel ID"),
-    members: z.array(MemberInputSchema).describe("Current member list")
+    members: z.array(MemberInputSchema).describe("Current member list"),
+    // Context (optional - auto-injected from RequestContext)
+    channel: z.enum(["LINE", "WHATSAPP", "TELEGRAM"]).optional().describe("Chat channel (auto-injected)"),
+    senderChannelId: z.string().optional().describe("User channel ID (auto-injected)"),
+    sourceChannelId: z.string().optional().describe("Group channel ID (auto-injected)")
   }),
   outputSchema: z.object({
     success: z.boolean(),
@@ -107,14 +109,13 @@ const syncMembersTool = createTool({
       total: z.number()
     }).optional()
   }),
-  execute: async (input) => {
-    const context = {
-      channel: input.channel,
-      senderChannelId: input.senderChannelId,
-      sourceChannelId: input.sourceChannelId
-    };
+  execute: async (input, ctx) => {
+    const context = getApiContext(input, ctx?.requestContext);
+    if (!context) {
+      return { success: false, message: "Error: Missing context" };
+    }
     try {
-      const sourceResponse = await apiRequest("GET", `/sources?channel=${input.channel}&channelId=${input.sourceChannelId}`, context);
+      const sourceResponse = await apiRequest("GET", `/sources?channel=${context.channel}&channelId=${context.sourceChannelId}`, context);
       if (!sourceResponse.source) {
         return {
           success: false,
@@ -151,32 +152,32 @@ const syncMembersTool = createTool({
 const setNicknameTool = createTool({
   id: "set-nickname",
   description: `Set a user's nickname for @mentions. Use when:
-- "\u0E15\u0E31\u0E49\u0E07\u0E0A\u0E37\u0E48\u0E2D\u0E40\u0E25\u0E48\u0E19 boss"
 - "call me boss"
-- "set nickname tom"`,
+- "set nickname tom"
+- "my name is X"`,
   inputSchema: z.object({
     nickname: z.string().describe("New nickname (without @)"),
-    channel: z.enum(["LINE", "WHATSAPP", "TELEGRAM"]).describe("Chat channel"),
-    senderChannelId: z.string().describe("User channel ID"),
-    sourceChannelId: z.string().describe("Group/DM channel ID")
+    // Context (optional - auto-injected from RequestContext)
+    channel: z.enum(["LINE", "WHATSAPP", "TELEGRAM"]).optional().describe("Chat channel (auto-injected)"),
+    senderChannelId: z.string().optional().describe("User channel ID (auto-injected)"),
+    sourceChannelId: z.string().optional().describe("Group/DM channel ID (auto-injected)")
   }),
   outputSchema: z.object({
     success: z.boolean(),
     message: z.string()
   }),
-  execute: async (input) => {
-    const context = {
-      channel: input.channel,
-      senderChannelId: input.senderChannelId,
-      sourceChannelId: input.sourceChannelId
-    };
+  execute: async (input, ctx) => {
+    const context = getApiContext(input, ctx?.requestContext);
+    if (!context) {
+      return { success: false, message: "Error: Missing context" };
+    }
     try {
       await apiRequest("PATCH", "/users/me", context, {
         nickname: input.nickname
       });
       return {
         success: true,
-        message: `\u2705 \u0E15\u0E31\u0E49\u0E07\u0E0A\u0E37\u0E48\u0E2D\u0E40\u0E25\u0E48\u0E19\u0E41\u0E25\u0E49\u0E27: @${input.nickname}`
+        message: `Nickname set: @${input.nickname}`
       };
     } catch (error) {
       return {

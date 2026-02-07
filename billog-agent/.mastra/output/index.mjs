@@ -1,14 +1,29 @@
 import { scoreTraces, scoreTracesWorkflow } from '@mastra/core/evals/scoreTraces';
 import { Mastra } from '@mastra/core';
+import { LibSQLVector, LibSQLStore } from '@mastra/libsql';
 import { Agent, MessageList, isSupportedLanguageModel, tryGenerateWithJsonFallback, tryStreamWithJsonFallback } from '@mastra/core/agent';
-import { setNicknameTool, syncMembersTool, initSourceTool } from './tools/07d279b2-46a7-4bac-bbf5-9fe07adc83be.mjs';
-import { recordSettlementTool } from './tools/c337d38d-b6d8-45d1-a3be-b5c5268fd4b6.mjs';
-import { getMyBalanceTool, getSpendingSummaryTool, getBalancesTool } from './tools/edeab097-99ae-415a-b21a-a15d07f1d884.mjs';
-import { deleteExpenseTool, getExpensesTool, createExpenseTool } from './tools/5a6962ea-35d5-4e09-8af6-89f0b84f2fa2.mjs';
+import { Memory as Memory$1 } from '@mastra/memory';
+import { Workspace, LocalFilesystem } from '@mastra/core/workspace';
+import { UnicodeNormalizer, TokenLimiterProcessor, isProcessorWorkflow } from '@mastra/core/processors';
+import { ModelRouterEmbeddingModel, PROVIDER_REGISTRY, ModelRouterLanguageModel } from '@mastra/core/llm';
+import path, { join, resolve as resolve$2, dirname, extname, basename, isAbsolute, relative } from 'path';
+import { fileURLToPath } from 'url';
+import { createExpenseTool, deleteExpenseTool, getExpenseByIdTool, getExpensesTool } from './tools/67cc85ab-293d-454d-9b13-1940c32e3fc7.mjs';
+import { setUserLanguageTool, getUserPreferencesTool } from './tools/551953aa-fe59-42d8-9606-409be897ed5f.mjs';
+import { getCategoryByNameTool, listCategoriesTool } from './tools/4f253952-0728-4174-8254-b3aead25c77c.mjs';
+import { setNicknameTool, syncMembersTool, initSourceTool } from './tools/dd3c6095-32cb-49a7-93a2-804fbe8a95e5.mjs';
+import { reconcileExpenseTool } from './tools/b23b5f83-73f9-453f-9140-67fa75c14a76.mjs';
+import { recordSettlementTool } from './tools/e530ac36-49d5-4d26-a707-69d9bbca7f1f.mjs';
+import { getMyBalanceTool, getSpendingSummaryTool, getBalancesTool } from './tools/4374479b-9bfc-4b45-8dc2-c39992b13757.mjs';
+import { processReceiptTool } from './tools/652371eb-aaa1-4fa9-b64a-0de19f58ec8a.mjs';
+import { processTextExpenseTool } from './tools/532da063-6b34-4743-86b3-316e3c078afd.mjs';
+import { createStep, createWorkflow } from '@mastra/core/workflows';
+import z$1, { z, ZodObject, ZodFirstPartyTypeKind as ZodFirstPartyTypeKind$1 } from 'zod';
+import { apiRequest, CATEGORIES, formatAmount } from './tools/5aaadd57-6742-4f80-91d8-d525c91493b6.mjs';
+import { parseExpenseText, validateParsedExpense, generateMissingFieldsPrompt } from './tools/285fa223-6376-40b1-a3e9-6d273fe28d8a.mjs';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 import { readdir, readFile, mkdtemp, rm, writeFile, mkdir, copyFile, stat } from 'fs/promises';
 import * as https from 'https';
-import { join, resolve as resolve$2, dirname, extname, basename, isAbsolute, relative } from 'path';
-import { fileURLToPath } from 'url';
 import { createServer } from 'http';
 import { Http2ServerRequest } from 'http2';
 import { Readable, Writable } from 'stream';
@@ -16,12 +31,9 @@ import crypto$1 from 'crypto';
 import { readFileSync, existsSync, createReadStream, lstatSync } from 'fs';
 import { isVercelTool, createTool, Tool } from '@mastra/core/tools';
 import { zodToJsonSchema as zodToJsonSchema$1 } from '@mastra/core/utils/zod-to-json';
-import z$1, { z, ZodObject, ZodFirstPartyTypeKind as ZodFirstPartyTypeKind$1 } from 'zod';
 import { coreFeatures } from '@mastra/core/features';
-import { isProcessorWorkflow } from '@mastra/core/processors';
 import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY, RequestContext } from '@mastra/core/request-context';
 import { MastraError, ErrorDomain, ErrorCategory } from '@mastra/core/error';
-import { PROVIDER_REGISTRY, ModelRouterLanguageModel } from '@mastra/core/llm';
 import { generateEmptyFromSchema } from '@mastra/core/utils';
 import { listScoresResponseSchema } from '@mastra/core/evals';
 import { listTracesResponseSchema, tracesFilterSchema, paginationArgsSchema, tracesOrderBySchema, getTraceResponseSchema, getTraceArgsSchema, scoreTracesResponseSchema, scoreTracesRequestSchema, spanIdsSchema, dateRangeSchema, InMemoryStore } from '@mastra/core/storage';
@@ -35,59 +47,90 @@ import { spawn as spawn$1, execFile as execFile$1, exec as exec$1 } from 'child_
 import { createRequire } from 'module';
 import util, { promisify } from 'util';
 import { tmpdir } from 'os';
-import { createWorkflow, createStep } from '@mastra/core/workflows';
 import { MastraServerBase } from '@mastra/core/server';
 import { Buffer as Buffer$1 } from 'buffer';
 import { tools } from './tools.mjs';
-import './tools/68251daa-bc82-4965-8592-33499397cad4.mjs';
+import 'jsonwebtoken';
 
-const BILLOG_INSTRUCTIONS = `You are Billog, an AI Bookkeeper that helps users track expenses and split bills through chat.
+const __filename$1 = fileURLToPath(import.meta.url);
+const __dirname$1 = path.dirname(__filename$1);
+const BILLOG_BASE_INSTRUCTIONS = `You are Billog, an AI Bookkeeper that helps users track expenses and split bills through chat.
 
-## Your Capabilities
+## Skills
 
-1. **Record Expenses** - Track spending from natural conversation or receipt images
-2. **Split Bills** - Divide expenses among group members (@all, @name)
-3. **Track Balances** - Show who owes whom in a group
-4. **Record Settlements** - Track payments between users
-5. **Generate Summaries** - Spending breakdowns by category/period
+You have access to skills that provide domain knowledge:
+- **billog-onboarding**: First interaction flow, welcome messages, help commands
+- **billog-bookkeeper**: Categories, response formats, expense tracking
+- **billog-reconciliation**: How to adjust and correct expenses
+- **billog-interpreter**: Translation rules for user's preferred language
 
-## Language Support
+Use the interpreter skill to translate your responses to the user's language. Important:
+- Translate labels, confirmations, error messages
+- Do NOT translate expense item names, store names, or user nicknames (keep original for querying)
 
-You understand and respond in both Thai and English. Match the user's language.
-- Thai input \u2192 Thai response
-- English input \u2192 English response
-- Mixed \u2192 Follow the dominant language
+## First Interaction
 
-## Response Style
+On first message in a new source (group/DM):
+1. Call init-source tool to register source and user
+2. Show welcome message based on skill guidance
+3. Then process user's actual request if any
 
-- **Concise**: Keep messages short and scannable
-- **Structured**: Use the standard response formats
-- **Helpful**: Auto-detect categories, currencies, and splits when possible
-- **Accurate**: Always show expense IDs (EX:xxx) for reference
+## Context
+
+Each message includes a [Context] block with:
+- Channel: LINE, WHATSAPP, or TELEGRAM
+- SenderChannelId: Who is talking
+- SourceChannelId: Which group/DM
+- IsGroup: true for groups, false for DM
+- SenderName: Display name if available
+- SourceName: Group name if available
+- QuotedMessageId: ID of message being replied to (if user quoted a message)
+- QuotedText: Text of quoted message (may contain EX:expense_id)
+
+Note: User's language preference is provided in the "RESPONSE LANGUAGE" section at the end of instructions.
+
+**Context fields (channel, senderChannelId, sourceChannelId) are auto-injected to all tools.**
+You do NOT need to pass these manually - focus on the actual business parameters.
+
+## Querying Specific Expense
+
+When user asks about a SPECIFIC expense (e.g., "how much was this?", "what was that?"):
+1. Check if QuotedText contains an expense ID (format: EX:xxx)
+2. If found, extract the ID and use get-expense-by-id tool
+3. If not found but user is asking about recent expense, query last expense from history
+
+Example:
+- User quotes message containing "EX:abc123" and asks "how much was this?"
+- Extract "abc123" from QuotedText
+- Call get-expense-by-id with expenseId="abc123"
 
 ## Expense Recording
 
-When user reports spending:
-1. Extract: description, amount, currency (default THB)
-2. Auto-detect category from description
-3. Check for split targets (@all, @name)
-4. Call create-expense tool
-5. Return confirmation with expense ID
+When user sends a TEXT message to record spending:
+1. Call process-text-expense tool with the text
+2. The tool parses, validates, and creates the expense in one step
+3. If missing info (e.g., no amount), tool will return questions to ask user
+4. Return the confirmation with EX:{expenseId}
 
 Examples:
-- "coffee 65" \u2192 Food, 65 THB, no split
-- "lunch 600 @all" \u2192 Food, 600 THB, equal split with all
-- "grab home 120" \u2192 Transport, 120 THB
+- "coffee 65" \u2192 process-text-expense \u2192 EX:xxx
+- "lunch 600 @all" \u2192 process-text-expense (handles split) \u2192 EX:xxx
+- "fuel $80 today" \u2192 process-text-expense (detects USD, date) \u2192 EX:xxx
+- "50" \u2192 process-text-expense \u2192 asks "What did you buy?"
+
+\u26A0\uFE0F Use process-text-expense for TEXT messages.
+\u26A0\uFE0F Use process-receipt for RECEIPT IMAGES.
 
 ## Receipt Processing
 
 When user sends a receipt image:
-1. Extract store name \u2192 description
-2. Extract line items with prices \u2192 items array
-3. Detect currency from location/format
-4. Sum items \u2192 amount
-5. Auto-detect category from store type
-6. Call create-expense with items
+1. Call process-receipt tool with the imageUrl
+2. The tool does OCR + creates expense in ONE step
+3. Only respond AFTER getting expenseId from the tool
+4. Include EX:{expenseId} in your response
+
+\u26A0\uFE0F CRITICAL: Use process-receipt (not extract-receipt) for receipts.
+process-receipt handles everything - OCR, expense creation, payment method linking.
 
 ## Bill Splitting
 
@@ -105,15 +148,6 @@ When user reports payment:
 - "paid jerry 200" \u2192 from=me, to=jerry
 - "via promptpay" \u2192 paymentMethod=3
 
-## Context Awareness
-
-You receive context about the chat:
-- channel: LINE, WHATSAPP, or TELEGRAM
-- senderChannelId: Who is talking
-- sourceChannelId: Which group/DM
-
-Pass this context to all tool calls.
-
 ## Error Handling
 
 - If receipt is unclear: Ask for clearer photo or manual input
@@ -128,16 +162,122 @@ Pass this context to all tool calls.
 3. Show remaining balance after settlements
 4. For large adjustments (>500 THB), confirm first
 5. Maintain audit trail - adjustments, not deletions`;
+const LANGUAGE_INSTRUCTIONS = {
+  th: `
+
+## RESPONSE LANGUAGE: THAI
+
+Respond in Thai. Use the billog-interpreter skill for translation rules.
+Remember: Keep expense item names, store names, and @nicknames in original language.`,
+  en: `
+
+## RESPONSE LANGUAGE: ENGLISH
+
+Respond in English. Use the billog-interpreter skill for translation rules.
+Remember: Keep expense item names, store names, and @nicknames in original language.`
+};
+function getBillogInstructions({ requestContext }) {
+  const userLanguage = requestContext?.get("userLanguage") || "th";
+  const languageSuffix = LANGUAGE_INSTRUCTIONS[userLanguage] || LANGUAGE_INSTRUCTIONS.th;
+  return BILLOG_BASE_INSTRUCTIONS + languageSuffix;
+}
+const billogMemory = new Memory$1({
+  // Composite storage for memory domain
+  storage: new LibSQLStore({
+    id: "billog-memory",
+    url: process.env.MEMORY_DATABASE_URL || "file:./data/agent-memory.db"
+  }),
+  // Vector store for semantic recall (same DB, different tables)
+  vector: new LibSQLVector({
+    id: "billog-vector",
+    url: process.env.MEMORY_DATABASE_URL || "file:./data/agent-memory.db"
+  }),
+  // Embedder for semantic search (uses OPENAI_API_KEY)
+  embedder: new ModelRouterEmbeddingModel("openai/text-embedding-3-small"),
+  options: {
+    // Minimal history - expense tracking is quick in/out
+    lastMessages: 3,
+    // Semantic recall - for "same as yesterday" or "lunch again"
+    semanticRecall: {
+      topK: 2,
+      // 2 similar past expenses is enough
+      messageRange: 1,
+      // Minimal context around match
+      scope: "resource"
+      // Search across all threads for this source
+    },
+    // Working memory - persistent user context (compact template)
+    workingMemory: {
+      enabled: true,
+      scope: "resource",
+      template: `# User Profile
+- **Language**:
+- **Currency**:
+- **Common Categories**:
+- **Frequent Stores**:
+
+# Group (if applicable)
+- **Usual Payer**:
+- **Split Method**:
+- **Members**:
+`
+    }
+  }
+});
+const unicodeNormalizer = new UnicodeNormalizer({
+  stripControlChars: true,
+  // Remove control chars (keep newlines, tabs)
+  preserveEmojis: true,
+  // Keep 📸 🍕 💰 etc for receipts
+  collapseWhitespace: true,
+  // Normalize spaces
+  trim: true
+  // Trim leading/trailing whitespace
+});
+const tokenLimiter = new TokenLimiterProcessor({
+  limit: 8e3
+  // Conservative limit for cost control
+});
+const billogWorkspace = new Workspace({
+  filesystem: new LocalFilesystem({
+    basePath: path.resolve(__dirname$1, ".."),
+    // src/mastra/
+    readOnly: true
+    // Agent doesn't need to write files
+  }),
+  skills: ["/skills"]
+  // Loads skills from src/mastra/skills/
+});
+function getBillogModel({ requestContext }) {
+  const ctx = requestContext;
+  const complexity = ctx?.get("taskComplexity") || "simple";
+  return complexity === "high" ? "openai/gpt-4o" : "openai/gpt-4o-mini";
+}
 const billogAgent = new Agent({
-  id: "billog-agent",
+  id: "billog",
   name: "Billog",
   description: "AI Bookkeeper for expense tracking, bill splitting, and group finances",
-  instructions: BILLOG_INSTRUCTIONS,
-  model: "openai/gpt-4o",
+  instructions: getBillogInstructions,
+  model: getBillogModel,
+  memory: billogMemory,
+  workspace: billogWorkspace,
+  // Input processors run before messages reach the LLM
+  // Order matters: normalize first, then limit tokens after all context is loaded
+  inputProcessors: [
+    unicodeNormalizer,
+    // 1. Normalize Thai text first
+    tokenLimiter
+    // 2. Limit tokens (runs after Memory adds history)
+  ],
   tools: {
-    // Expense tools
-    createExpense: createExpenseTool,
+    // Primary expense tools (use these for recording)
+    processTextExpense: processTextExpenseTool,
+    // For text messages
+    processReceipt: processReceiptTool,
+    // For receipt images
+    // Query/manage expense tools
     getExpenses: getExpensesTool,
+    getExpenseById: getExpenseByIdTool,
     deleteExpense: deleteExpenseTool,
     // Balance tools
     getBalances: getBalancesTool,
@@ -145,17 +285,1651 @@ const billogAgent = new Agent({
     getMyBalance: getMyBalanceTool,
     // Settlement tools
     recordSettlement: recordSettlementTool,
+    // Reconciliation tools
+    reconcileExpense: reconcileExpenseTool,
     // Source tools
     initSource: initSourceTool,
     syncMembers: syncMembersTool,
-    setNickname: setNicknameTool
+    setNickname: setNicknameTool,
+    // Category tools (for queries)
+    listCategories: listCategoriesTool,
+    getCategoryByName: getCategoryByNameTool,
+    // User preference tools
+    getUserPreferences: getUserPreferencesTool,
+    setUserLanguage: setUserLanguageTool,
+    // Legacy (kept for compatibility)
+    createExpense: createExpenseTool
   }
 });
 
+const ChannelSchema = z.enum(["LINE", "WHATSAPP", "TELEGRAM"]);
+const LanguageSchema = z.enum(["th", "en"]);
+const MessageInputSchema = z.object({
+  // Channel context
+  channel: ChannelSchema,
+  senderChannelId: z.string(),
+  sourceChannelId: z.string(),
+  isGroup: z.boolean(),
+  senderName: z.string().optional(),
+  sourceName: z.string().optional(),
+  // User preferences
+  userLanguage: LanguageSchema.default("th"),
+  userCurrency: z.string().default("THB"),
+  userTimezone: z.string().default("Asia/Bangkok"),
+  // Message content
+  messageText: z.string().optional(),
+  imageUrl: z.string().optional(),
+  imageBase64: z.string().optional(),
+  // Quote context (for expense lookup)
+  quotedMessageId: z.string().optional(),
+  quotedMessageText: z.string().optional()
+});
+const ParsedExpenseItemSchema = z.object({
+  name: z.string(),
+  nameLocalized: z.string().nullable(),
+  quantity: z.number().default(1),
+  unitPrice: z.number(),
+  ingredientType: z.string().nullable().optional(),
+  assignedTo: z.string().optional()
+  // For item-based splits
+});
+const ParsedExpenseSchema = z.object({
+  description: z.string().nullable(),
+  amount: z.number().nullable(),
+  currency: z.string().default("THB"),
+  category: z.string().nullable(),
+  date: z.string().nullable(),
+  // YYYY-MM-DD
+  // Split info (group only)
+  splitType: z.enum(["equal", "exact", "percentage", "item"]).nullable(),
+  splitTargets: z.array(z.string()).default([]),
+  // @all, @name
+  // Items (from receipt OCR)
+  items: z.array(ParsedExpenseItemSchema).default([]),
+  // Payment info (from receipt OCR)
+  payment: z.object({
+    method: z.string().nullable(),
+    cardType: z.string().nullable(),
+    cardLast4: z.string().nullable(),
+    bankName: z.string().nullable()
+  }).nullable().optional(),
+  // Metadata
+  metadata: z.record(z.unknown()).optional()
+});
+const MessageWorkflowStateSchema = z.object({
+  // Source initialization
+  sourceInitialized: z.boolean().default(false),
+  isNewSource: z.boolean().default(false),
+  isNewUser: z.boolean().default(false),
+  // Message type detection (nullable with default)
+  messageType: z.enum(["expense_text", "expense_receipt", "query", "settlement", "help", "other"]).nullable().default(null),
+  // Parsed expense (accumulated from parse/OCR steps)
+  parsedExpense: ParsedExpenseSchema.nullable().default(null),
+  // OCR specific
+  isReceipt: z.boolean().default(false),
+  // Validation
+  isValid: z.boolean().default(false),
+  missingFields: z.array(z.string()).default([]),
+  // Group-specific
+  groupMembers: z.array(z.object({
+    id: z.string(),
+    name: z.string().nullable(),
+    nickname: z.string().nullable()
+  })).default([]),
+  // Result (nullable with default)
+  expenseId: z.string().nullable().default(null),
+  responseMessage: z.string().nullable().default(null),
+  // Error handling (nullable with default)
+  error: z.string().nullable().default(null)
+});
+const MessageOutputSchema = z.object({
+  success: z.boolean(),
+  status: z.enum(["completed", "suspended", "failed", "fallback"]),
+  message: z.string(),
+  expenseId: z.string().optional(),
+  // For suspend/resume
+  suspendReason: z.string().optional(),
+  missingFields: z.array(z.string()).optional(),
+  // For fallback (agent handling)
+  fallbackReason: z.string().optional()
+});
+const ExpenseResumeSchema = z.object({
+  description: z.string().optional(),
+  amount: z.number().optional(),
+  splitTargets: z.array(z.string()).optional()
+});
+function buildApiContext(input) {
+  return {
+    channel: input.channel,
+    senderChannelId: input.senderChannelId,
+    sourceChannelId: input.sourceChannelId,
+    sourceType: input.isGroup ? "GROUP" : "DM"
+  };
+}
+
+const EnsureSourceInitOutputSchema = z.object({
+  sourceInitialized: z.boolean(),
+  isNewSource: z.boolean(),
+  isNewUser: z.boolean()
+});
+const ensureSourceInitStep = createStep({
+  id: "ensure-source-init",
+  description: "Initialize source, user, and membership in the system",
+  inputSchema: MessageInputSchema,
+  outputSchema: EnsureSourceInitOutputSchema,
+  stateSchema: MessageWorkflowStateSchema,
+  execute: async ({ inputData, setState, state }) => {
+    const input = inputData;
+    console.log(`
+${"=".repeat(60)}`);
+    console.log(`[STEP] ensure-source-init`);
+    console.log(`${"=".repeat(60)}`);
+    console.log(`  Channel:    ${input.channel}`);
+    console.log(`  Source:     ${input.sourceChannelId} (${input.isGroup ? "GROUP" : "DM"})`);
+    console.log(`  Sender:     ${input.senderChannelId}`);
+    console.log(`${"=".repeat(60)}
+`);
+    const context = buildApiContext(input);
+    try {
+      const response = await apiRequest("POST", "/sources/init", context, {
+        channel: input.channel,
+        sourceChannelId: input.sourceChannelId,
+        sourceType: input.isGroup ? "GROUP" : "DM",
+        sourceName: input.sourceName,
+        senderChannelId: input.senderChannelId,
+        senderDisplayName: input.senderName,
+        currency: input.userCurrency
+      });
+      const isNewSource = response.isNewSource ?? false;
+      const isNewUser = response.isNewUser ?? false;
+      if (isNewSource) {
+        console.log(`[ensure-source-init] New source: ${response.source?.name}`);
+      }
+      if (isNewUser) {
+        console.log(`[ensure-source-init] New user: ${response.user?.name}`);
+      }
+      setState({
+        ...state,
+        sourceInitialized: true,
+        isNewSource,
+        isNewUser
+      });
+      console.log(`[ensure-source-init] \u2705 Source initialized`);
+      return {
+        sourceInitialized: true,
+        isNewSource,
+        isNewUser
+      };
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : "Unknown error";
+      console.error(`[ensure-source-init] \u274C Error: ${errorMsg}`);
+      setState({
+        ...state,
+        sourceInitialized: false,
+        isNewSource: false,
+        isNewUser: false,
+        error: `Source init failed: ${errorMsg}`
+      });
+      return {
+        sourceInitialized: false,
+        isNewSource: false,
+        isNewUser: false
+      };
+    }
+  }
+});
+
+const DmParseTextInputSchema = z.object({
+  messageText: z.string(),
+  userCurrency: z.string().default("THB"),
+  userLanguage: z.enum(["th", "en"]).default("th")
+});
+const DmParseTextOutputSchema = z.object({
+  success: z.boolean(),
+  parsedExpense: ParsedExpenseSchema.nullable(),
+  isValid: z.boolean(),
+  missingFields: z.array(z.string())
+});
+const dmParseTextStep = createStep({
+  id: "dm-parse-text",
+  description: "Parse text message into expense data (DM - no splits)",
+  inputSchema: DmParseTextInputSchema,
+  outputSchema: DmParseTextOutputSchema,
+  stateSchema: MessageWorkflowStateSchema,
+  execute: async ({ inputData, setState, state }) => {
+    console.log(`
+${"=".repeat(60)}`);
+    console.log(`[STEP] dm-parse-text`);
+    console.log(`${"=".repeat(60)}`);
+    console.log(`  Text: "${inputData.messageText}"`);
+    console.log(`${"=".repeat(60)}
+`);
+    const parsed = parseExpenseText(inputData.messageText);
+    parsed.splitType = null;
+    parsed.splitTargets = [];
+    if (parsed.currency === "THB" && inputData.userCurrency !== "THB") {
+      const hasExplicitCurrency = /[฿$€¥]|\b(THB|USD|EUR|JPY|AUD)\b/i.test(inputData.messageText);
+      if (!hasExplicitCurrency) {
+        parsed.currency = inputData.userCurrency;
+      }
+    }
+    const { isValid, missingFields } = validateParsedExpense(parsed);
+    console.log(`[dm-parse-text] Parsed: ${JSON.stringify(parsed)}`);
+    console.log(`[dm-parse-text] Valid: ${isValid}, Missing: ${missingFields.join(", ") || "none"}`);
+    const parsedExpense = {
+      description: parsed.description,
+      amount: parsed.amount,
+      currency: parsed.currency,
+      category: parsed.category,
+      date: parsed.date,
+      splitType: null,
+      splitTargets: [],
+      items: [],
+      payment: null,
+      metadata: void 0
+    };
+    setState({
+      ...state,
+      messageType: "expense_text",
+      parsedExpense,
+      isValid,
+      missingFields
+    });
+    return {
+      success: true,
+      parsedExpense,
+      isValid,
+      missingFields
+    };
+  }
+});
+
+const genAI$1 = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY || "");
+const EXTRACT_TEXT_PROMPT$1 = `Extract ALL text from this image exactly as shown.
+Include every word, number, and symbol visible.
+Return ONLY the raw text, no formatting or explanation.`;
+const categoryList$1 = Object.keys(CATEGORIES).join("|");
+const ANALYZE_TEXT_PROMPT$1 = `Analyze this receipt text and extract structured data as JSON.
+
+Receipt text:
+---
+{TEXT}
+---
+
+Return JSON:
+{
+  "isReceipt": true/false,
+  "storeName": "store name in English",
+  "storeNameLocalized": "original name if not English, else null",
+  "category": "${categoryList$1}",
+  "items": [
+    {
+      "name": "item in English",
+      "nameLocalized": "original if not English, else null",
+      "quantity": 1,
+      "unitPrice": 0.00
+    }
+  ],
+  "subtotal": 0.00,
+  "tax": 0.00,
+  "total": 0.00,
+  "currency": "THB|USD|AUD|EUR|JPY",
+  "payment": {
+    "method": "Cash|Credit|Debit|QR|PromptPay|null",
+    "cardType": "VISA|Mastercard|JCB|null",
+    "cardLast4": "1234|null",
+    "bankName": "SCB|KBank|null"
+  },
+  "metadata": {
+    "receiptNo": "receipt number|null",
+    "transactionDate": "YYYY-MM-DD|null"
+  }
+}
+
+Rules:
+- If NOT a receipt, return {"isReceipt": false}
+- Translate non-English to English in "name" fields
+- Keep original in "nameLocalized"
+- Return ONLY valid JSON, no markdown`;
+function sleep$1(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+async function downloadImage$1(url) {
+  const response = await fetch(url, {
+    headers: { "User-Agent": "Mozilla/5.0", "Accept": "image/*,*/*;q=0.8" }
+  });
+  if (!response.ok) throw new Error(`Failed to download image: ${response.status}`);
+  const buffer = await response.arrayBuffer();
+  return {
+    data: Buffer.from(buffer).toString("base64"),
+    mimeType: response.headers.get("content-type") || "image/jpeg"
+  };
+}
+async function callGemini$1(model, content, maxRetries = 3) {
+  const geminiModel = genAI$1.getGenerativeModel({ model });
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await geminiModel.generateContent(content);
+      return response.response.text();
+    } catch (error) {
+      const isRateLimit = error instanceof Error && (error.message.includes("429") || error.message.includes("Resource exhausted"));
+      if (isRateLimit && attempt < maxRetries) {
+        await sleep$1(Math.pow(2, attempt) * 1e3);
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw new Error("Max retries exceeded");
+}
+function parseJSON$3(text) {
+  let cleaned = text.trim();
+  if (cleaned.startsWith("```json")) cleaned = cleaned.slice(7);
+  else if (cleaned.startsWith("```")) cleaned = cleaned.slice(3);
+  if (cleaned.endsWith("```")) cleaned = cleaned.slice(0, -3);
+  return JSON.parse(cleaned.trim());
+}
+const DmProcessReceiptInputSchema = z.object({
+  imageUrl: z.string().optional(),
+  imageBase64: z.string().optional(),
+  userCurrency: z.string().default("THB")
+});
+const DmProcessReceiptOutputSchema = z.object({
+  success: z.boolean(),
+  isReceipt: z.boolean(),
+  parsedExpense: ParsedExpenseSchema.nullable(),
+  isValid: z.boolean(),
+  missingFields: z.array(z.string()),
+  error: z.string().optional()
+});
+const dmProcessReceiptStep = createStep({
+  id: "dm-process-receipt",
+  description: "Process receipt image using OCR (DM - no splits)",
+  inputSchema: DmProcessReceiptInputSchema,
+  outputSchema: DmProcessReceiptOutputSchema,
+  stateSchema: MessageWorkflowStateSchema,
+  execute: async ({ inputData, setState, state }) => {
+    console.log(`
+${"=".repeat(60)}`);
+    console.log(`[STEP] dm-process-receipt`);
+    console.log(`${"=".repeat(60)}`);
+    console.log(`  ImageURL: ${inputData.imageUrl || "(base64 provided)"}`);
+    console.log(`${"=".repeat(60)}
+`);
+    if (!inputData.imageUrl && !inputData.imageBase64) {
+      setState({ ...state, messageType: "expense_receipt", isReceipt: false, error: "No image provided" });
+      return { success: false, isReceipt: false, parsedExpense: null, isValid: false, missingFields: [], error: "No image provided" };
+    }
+    try {
+      let imageData;
+      if (inputData.imageBase64) {
+        imageData = { data: inputData.imageBase64.replace(/^data:image\/\w+;base64,/, ""), mimeType: "image/jpeg" };
+      } else {
+        imageData = await downloadImage$1(inputData.imageUrl);
+      }
+      console.log("[OCR] Extracting text...");
+      const rawText = await callGemini$1("gemini-2.0-flash", [
+        EXTRACT_TEXT_PROMPT$1,
+        { inlineData: { data: imageData.data, mimeType: imageData.mimeType } }
+      ]);
+      console.log("[OCR] Analyzing text...");
+      const analysisText = await callGemini$1("gemini-2.0-flash", [ANALYZE_TEXT_PROMPT$1.replace("{TEXT}", rawText)]);
+      const ocrResult = parseJSON$3(analysisText);
+      if (!ocrResult.isReceipt) {
+        setState({ ...state, messageType: "expense_receipt", isReceipt: false });
+        return { success: true, isReceipt: false, parsedExpense: null, isValid: false, missingFields: [] };
+      }
+      const items = (ocrResult.items || []).map((item) => ({
+        name: item.name || "Unknown",
+        nameLocalized: item.nameLocalized || null,
+        quantity: item.quantity || 1,
+        unitPrice: item.unitPrice || 0,
+        ingredientType: null
+      }));
+      const payment = ocrResult.payment;
+      const metadata = ocrResult.metadata;
+      const parsedExpense = {
+        description: ocrResult.storeName || ocrResult.storeNameLocalized || null,
+        amount: ocrResult.total || null,
+        currency: ocrResult.currency || "THB",
+        category: ocrResult.category || null,
+        date: metadata?.transactionDate || null,
+        splitType: null,
+        splitTargets: [],
+        items,
+        payment: payment ? {
+          method: payment.method || null,
+          cardType: payment.cardType || null,
+          cardLast4: payment.cardLast4 || null,
+          bankName: payment.bankName || null
+        } : null,
+        metadata: {
+          receiptNo: metadata?.receiptNo,
+          subtotal: ocrResult.subtotal,
+          tax: ocrResult.tax
+        }
+      };
+      const missingFields = [];
+      if (!parsedExpense.amount) missingFields.push("amount");
+      if (!parsedExpense.description) missingFields.push("description");
+      const isValid = missingFields.length === 0;
+      console.log(`[OCR] \u2705 ${parsedExpense.description} | ${parsedExpense.amount} ${parsedExpense.currency}`);
+      setState({ ...state, messageType: "expense_receipt", isReceipt: true, parsedExpense, isValid, missingFields });
+      return { success: true, isReceipt: true, parsedExpense, isValid, missingFields };
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : "Unknown error";
+      console.error(`[OCR] \u274C Error: ${errorMsg}`);
+      setState({ ...state, messageType: "expense_receipt", isReceipt: false, error: errorMsg });
+      return { success: false, isReceipt: false, parsedExpense: null, isValid: false, missingFields: [], error: errorMsg };
+    }
+  }
+});
+
+const DmValidateInputSchema = z.object({
+  parsedExpense: ParsedExpenseSchema.nullable(),
+  isValid: z.boolean(),
+  missingFields: z.array(z.string()),
+  userLanguage: z.enum(["th", "en"]).default("th"),
+  userCurrency: z.string().default("THB")
+});
+const DmValidateOutputSchema = z.object({
+  isValid: z.boolean(),
+  parsedExpense: ParsedExpenseSchema
+});
+const DmValidateSuspendSchema = z.object({
+  prompt: z.string(),
+  missingFields: z.array(z.string())
+});
+const dmValidateStep = createStep({
+  id: "dm-validate",
+  description: "Validate DM expense and suspend for missing info (HITL)",
+  inputSchema: DmValidateInputSchema,
+  outputSchema: DmValidateOutputSchema,
+  stateSchema: MessageWorkflowStateSchema,
+  resumeSchema: ExpenseResumeSchema,
+  suspendSchema: DmValidateSuspendSchema,
+  execute: async ({ inputData, resumeData, suspend, setState, state }) => {
+    console.log(`
+${"=".repeat(60)}`);
+    console.log(`[STEP] dm-validate`);
+    console.log(`${"=".repeat(60)}`);
+    console.log(`  IsValid: ${inputData.isValid}`);
+    console.log(`  Missing: ${inputData.missingFields.join(", ") || "none"}`);
+    if (resumeData) {
+      console.log(`  ResumeData: ${JSON.stringify(resumeData)}`);
+    }
+    console.log(`${"=".repeat(60)}
+`);
+    let parsedExpense = inputData.parsedExpense || {
+      description: null,
+      amount: null,
+      currency: inputData.userCurrency,
+      category: "Other",
+      date: null,
+      splitType: null,
+      splitTargets: [],
+      items: [],
+      payment: null,
+      metadata: void 0
+    };
+    if (resumeData) {
+      console.log(`[dm-validate] Processing resume data...`);
+      if (resumeData.description || resumeData.amount) {
+        if (resumeData.description) {
+          parsedExpense = { ...parsedExpense, description: resumeData.description };
+        }
+        if (resumeData.amount) {
+          parsedExpense = { ...parsedExpense, amount: resumeData.amount };
+        }
+      }
+      console.log(`[dm-validate] After merge: ${JSON.stringify(parsedExpense)}`);
+    }
+    const missingFields = [];
+    if (!parsedExpense.amount) missingFields.push("amount");
+    if (!parsedExpense.description) missingFields.push("description");
+    const isValid = missingFields.length === 0;
+    if (!isValid) {
+      const prompt = generateMissingFieldsPrompt(
+        {
+          description: parsedExpense.description,
+          amount: parsedExpense.amount,
+          currency: parsedExpense.currency},
+        missingFields,
+        inputData.userLanguage
+      );
+      console.log(`[dm-validate] Suspending for: ${missingFields.join(", ")}`);
+      console.log(`[dm-validate] Prompt: "${prompt}"`);
+      setState({
+        ...state,
+        parsedExpense,
+        isValid: false,
+        missingFields
+      });
+      return await suspend({
+        prompt,
+        missingFields
+      });
+    }
+    console.log(`[dm-validate] \u2705 Validation passed`);
+    setState({
+      ...state,
+      parsedExpense,
+      isValid: true,
+      missingFields: []
+    });
+    return {
+      isValid: true,
+      parsedExpense
+    };
+  }
+});
+
+const CreateExpenseInputSchema = z.object({
+  parsedExpense: ParsedExpenseSchema,
+  channel: ChannelSchema,
+  senderChannelId: z.string(),
+  sourceChannelId: z.string(),
+  isGroup: z.boolean(),
+  imageUrl: z.string().optional()
+  // For receipt data
+});
+const CreateExpenseOutputSchema = z.object({
+  success: z.boolean(),
+  expenseId: z.string().optional(),
+  splits: z.array(z.object({
+    userId: z.string(),
+    name: z.string().nullable(),
+    amount: z.number()
+  })).optional(),
+  error: z.string().optional()
+});
+const createExpenseStep = createStep({
+  id: "create-expense",
+  description: "Create expense record via API",
+  inputSchema: CreateExpenseInputSchema,
+  outputSchema: CreateExpenseOutputSchema,
+  stateSchema: MessageWorkflowStateSchema,
+  execute: async ({ inputData, setState, state }) => {
+    const { parsedExpense, channel, senderChannelId, sourceChannelId, isGroup } = inputData;
+    console.log(`
+${"=".repeat(60)}`);
+    console.log(`[STEP] create-expense`);
+    console.log(`${"=".repeat(60)}`);
+    console.log(`  Description: ${parsedExpense.description}`);
+    console.log(`  Amount:      ${parsedExpense.amount} ${parsedExpense.currency}`);
+    console.log(`  IsGroup:     ${isGroup}`);
+    if (parsedExpense.splitTargets.length > 0) {
+      console.log(`  Splits:      ${parsedExpense.splitTargets.join(", ")}`);
+    }
+    console.log(`${"=".repeat(60)}
+`);
+    const context = {
+      channel,
+      senderChannelId,
+      sourceChannelId,
+      sourceType: isGroup ? "GROUP" : "DM"
+    };
+    try {
+      const requestBody = {
+        channel,
+        senderChannelId,
+        sourceChannelId,
+        sourceType: isGroup ? "GROUP" : "DM",
+        description: parsedExpense.description,
+        amount: parsedExpense.amount,
+        currency: parsedExpense.currency,
+        date: parsedExpense.date
+      };
+      if (isGroup && parsedExpense.splitType && parsedExpense.splitTargets.length > 0) {
+        requestBody.splitType = parsedExpense.splitType;
+        requestBody.splits = parsedExpense.splitTargets.map((target) => ({ target }));
+      }
+      if (parsedExpense.items && parsedExpense.items.length > 0) {
+        requestBody.items = parsedExpense.items.map((item) => ({
+          name: item.name,
+          nameLocalized: item.nameLocalized,
+          quantity: item.quantity,
+          unitPrice: item.unitPrice,
+          ingredientType: item.ingredientType
+        }));
+      }
+      if (inputData.imageUrl && parsedExpense.metadata) {
+        requestBody.receiptData = {
+          imageUrl: inputData.imageUrl,
+          storeName: parsedExpense.description,
+          subtotal: parsedExpense.metadata.subtotal,
+          tax: parsedExpense.metadata.tax,
+          total: parsedExpense.amount
+        };
+      }
+      if (parsedExpense.metadata) {
+        requestBody.metadata = parsedExpense.metadata;
+      }
+      const response = await apiRequest("POST", "/expenses", context, requestBody);
+      if (!response.expense?.id) {
+        console.error(`[create-expense] \u274C No expenseId in response`);
+        setState({
+          ...state,
+          expenseId: null,
+          error: "Expense was not saved"
+        });
+        return {
+          success: false,
+          error: "Expense was not saved. Please try again."
+        };
+      }
+      console.log(`[create-expense] \u2705 SUCCESS: EX:${response.expense.id}`);
+      setState({
+        ...state,
+        expenseId: response.expense.id
+      });
+      return {
+        success: true,
+        expenseId: response.expense.id,
+        splits: response.splits
+      };
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : "Unknown error";
+      console.error(`[create-expense] \u274C Error: ${errorMsg}`);
+      setState({
+        ...state,
+        expenseId: null,
+        error: errorMsg
+      });
+      return {
+        success: false,
+        error: errorMsg
+      };
+    }
+  }
+});
+
+const FormatResponseInputSchema = z.object({
+  success: z.boolean(),
+  expenseId: z.string().optional(),
+  parsedExpense: ParsedExpenseSchema,
+  splits: z.array(z.object({
+    userId: z.string(),
+    name: z.string().nullable(),
+    amount: z.number()
+  })).optional(),
+  error: z.string().optional(),
+  userLanguage: z.enum(["th", "en"]).default("th")
+});
+const formatResponseStep = createStep({
+  id: "format-response",
+  description: "Format the final response message",
+  inputSchema: FormatResponseInputSchema,
+  outputSchema: MessageOutputSchema,
+  stateSchema: MessageWorkflowStateSchema,
+  execute: async ({ inputData, setState, state }) => {
+    console.log(`
+${"=".repeat(60)}`);
+    console.log(`[STEP] format-response`);
+    console.log(`${"=".repeat(60)}`);
+    console.log(`  Success: ${inputData.success}`);
+    console.log(`  ExpenseId: ${inputData.expenseId || "none"}`);
+    console.log(`${"=".repeat(60)}
+`);
+    const { parsedExpense, splits, userLanguage } = inputData;
+    if (!inputData.success || !inputData.expenseId) {
+      const errorMessage = userLanguage === "th" ? `\u0E40\u0E01\u0E34\u0E14\u0E02\u0E49\u0E2D\u0E1C\u0E34\u0E14\u0E1E\u0E25\u0E32\u0E14: ${inputData.error || "\u0E44\u0E21\u0E48\u0E2A\u0E32\u0E21\u0E32\u0E23\u0E16\u0E1A\u0E31\u0E19\u0E17\u0E36\u0E01\u0E44\u0E14\u0E49"}` : `Error: ${inputData.error || "Could not save expense"}`;
+      setState({
+        ...state,
+        responseMessage: errorMessage
+      });
+      return {
+        success: false,
+        status: "failed",
+        message: errorMessage
+      };
+    }
+    const formattedAmount = formatAmount(parsedExpense.amount, parsedExpense.currency);
+    let message = `${parsedExpense.description} | ${formattedAmount}`;
+    if (parsedExpense.category) {
+      message += `
+Category: ${parsedExpense.category}`;
+    }
+    if (parsedExpense.date) {
+      const dateObj = new Date(parsedExpense.date);
+      const today = /* @__PURE__ */ new Date();
+      const isToday = dateObj.toDateString() === today.toDateString();
+      if (!isToday) {
+        const formattedDate = dateObj.toLocaleDateString("en-GB", {
+          day: "numeric",
+          month: "short",
+          year: "numeric"
+        });
+        message += `
+Date: ${formattedDate}`;
+      }
+    }
+    if (parsedExpense.items && parsedExpense.items.length > 0) {
+      message += `
+\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500`;
+      for (const item of parsedExpense.items) {
+        const qty = item.quantity || 1;
+        const unitPrice = item.unitPrice || 0;
+        const lineTotal = qty * unitPrice;
+        message += `
+- ${item.name} x${qty} @ ${formatAmount(unitPrice, parsedExpense.currency)} = ${formatAmount(lineTotal, parsedExpense.currency)}`;
+      }
+      message += `
+\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500`;
+    }
+    if (parsedExpense.payment?.method) {
+      let paymentStr = `Paid: ${parsedExpense.payment.method}`;
+      if (parsedExpense.payment.cardType && parsedExpense.payment.cardLast4) {
+        paymentStr += ` (${parsedExpense.payment.cardType} **${parsedExpense.payment.cardLast4})`;
+      } else if (parsedExpense.payment.cardLast4) {
+        paymentStr += ` (**${parsedExpense.payment.cardLast4})`;
+      }
+      if (parsedExpense.payment.bankName) {
+        paymentStr += ` - ${parsedExpense.payment.bankName}`;
+      }
+      message += `
+${paymentStr}`;
+    }
+    message += `
+EX:${inputData.expenseId}`;
+    if (splits && splits.length > 0) {
+      message += "\n" + splits.map(
+        (s) => `   \u2192 @${s.name || "Unknown"} owes ${formatAmount(s.amount, parsedExpense.currency)}`
+      ).join("\n");
+    }
+    console.log(`[format-response] \u2705 Message formatted`);
+    setState({
+      ...state,
+      responseMessage: message
+    });
+    return {
+      success: true,
+      status: "completed",
+      message,
+      expenseId: inputData.expenseId
+    };
+  }
+});
+
+const DmWorkflowInputSchema = z.object({
+  sourceInitialized: z.boolean(),
+  isNewSource: z.boolean(),
+  isNewUser: z.boolean()
+});
+const dmTextExpenseWorkflow = createWorkflow({
+  id: "dm-text-expense",
+  inputSchema: DmWorkflowInputSchema,
+  outputSchema: MessageOutputSchema,
+  stateSchema: MessageWorkflowStateSchema
+}).map(async ({ getInitData }) => {
+  const initData = getInitData();
+  return {
+    messageText: initData.messageText || "",
+    userCurrency: initData.userCurrency,
+    userLanguage: initData.userLanguage
+  };
+}).then(dmParseTextStep).map(async ({ inputData, getInitData }) => {
+  const initData = getInitData();
+  return {
+    parsedExpense: inputData.parsedExpense,
+    isValid: inputData.isValid,
+    missingFields: inputData.missingFields,
+    userLanguage: initData.userLanguage,
+    userCurrency: initData.userCurrency
+  };
+}).then(dmValidateStep).map(async ({ inputData, getInitData }) => {
+  const initData = getInitData();
+  return {
+    parsedExpense: inputData.parsedExpense,
+    channel: initData.channel,
+    senderChannelId: initData.senderChannelId,
+    sourceChannelId: initData.sourceChannelId,
+    isGroup: false
+  };
+}).then(createExpenseStep).map(async ({ inputData, getStepResult, getInitData }) => {
+  const initData = getInitData();
+  const validateResult = getStepResult("dm-validate");
+  return {
+    success: inputData.success,
+    expenseId: inputData.expenseId,
+    parsedExpense: validateResult.parsedExpense,
+    splits: inputData.splits,
+    error: inputData.error,
+    userLanguage: initData.userLanguage
+  };
+}).then(formatResponseStep).commit();
+const dmReceiptExpenseWorkflow = createWorkflow({
+  id: "dm-receipt-expense",
+  inputSchema: DmWorkflowInputSchema,
+  outputSchema: MessageOutputSchema,
+  stateSchema: MessageWorkflowStateSchema
+}).map(async ({ getInitData }) => {
+  const initData = getInitData();
+  return {
+    imageUrl: initData.imageUrl,
+    imageBase64: initData.imageBase64,
+    userCurrency: initData.userCurrency
+  };
+}).then(dmProcessReceiptStep).branch([
+  // Not a receipt - return error
+  [
+    async ({ inputData }) => !inputData.isReceipt,
+    createStep({
+      id: "not-a-receipt",
+      inputSchema: z.any(),
+      outputSchema: MessageOutputSchema,
+      execute: async ({ inputData, getInitData }) => {
+        const initData = getInitData();
+        const lang = initData.userLanguage;
+        return {
+          success: false,
+          status: "failed",
+          message: lang === "th" ? "\u0E44\u0E21\u0E48\u0E1E\u0E1A\u0E43\u0E1A\u0E40\u0E2A\u0E23\u0E47\u0E08\u0E43\u0E19\u0E23\u0E39\u0E1B \u0E01\u0E23\u0E38\u0E13\u0E32\u0E2A\u0E48\u0E07\u0E23\u0E39\u0E1B\u0E43\u0E1A\u0E40\u0E2A\u0E23\u0E47\u0E08\u0E17\u0E35\u0E48\u0E0A\u0E31\u0E14\u0E40\u0E08\u0E19" : "This does not appear to be a receipt. Please send a clear photo of a receipt."
+        };
+      }
+    })
+  ],
+  // Is a receipt - continue with validation
+  [
+    async ({ inputData }) => inputData.isReceipt,
+    createWorkflow({
+      id: "dm-receipt-valid-path",
+      inputSchema: z.any(),
+      outputSchema: MessageOutputSchema,
+      stateSchema: MessageWorkflowStateSchema
+    }).map(async ({ inputData, getInitData }) => {
+      const initData = getInitData();
+      return {
+        parsedExpense: inputData.parsedExpense,
+        isValid: inputData.isValid,
+        missingFields: inputData.missingFields,
+        userLanguage: initData.userLanguage,
+        userCurrency: initData.userCurrency
+      };
+    }).then(dmValidateStep).map(async ({ inputData, getInitData }) => {
+      const initData = getInitData();
+      return {
+        parsedExpense: inputData.parsedExpense,
+        channel: initData.channel,
+        senderChannelId: initData.senderChannelId,
+        sourceChannelId: initData.sourceChannelId,
+        isGroup: false,
+        imageUrl: initData.imageUrl
+      };
+    }).then(createExpenseStep).map(async ({ inputData, getStepResult, getInitData }) => {
+      const initData = getInitData();
+      const validateResult = getStepResult("dm-validate");
+      return {
+        success: inputData.success,
+        expenseId: inputData.expenseId,
+        parsedExpense: validateResult.parsedExpense,
+        splits: inputData.splits,
+        error: inputData.error,
+        userLanguage: initData.userLanguage
+      };
+    }).then(formatResponseStep).commit()
+  ]
+]).commit();
+const dmWorkflow = createWorkflow({
+  id: "dm-workflow",
+  inputSchema: DmWorkflowInputSchema,
+  outputSchema: MessageOutputSchema,
+  stateSchema: MessageWorkflowStateSchema
+}).branch([
+  // Text expense path
+  [
+    async ({ getInitData }) => {
+      const initData = getInitData();
+      return !initData.imageUrl && !initData.imageBase64 && !!initData.messageText;
+    },
+    dmTextExpenseWorkflow
+  ],
+  // Receipt expense path
+  [
+    async ({ getInitData }) => {
+      const initData = getInitData();
+      return !!(initData.imageUrl || initData.imageBase64);
+    },
+    dmReceiptExpenseWorkflow
+  ],
+  // No content - fallback
+  [
+    async () => true,
+    // Default case
+    createStep({
+      id: "dm-no-content",
+      inputSchema: z.any(),
+      outputSchema: MessageOutputSchema,
+      execute: async ({ getInitData }) => {
+        const initData = getInitData();
+        const lang = initData.userLanguage;
+        return {
+          success: false,
+          status: "fallback",
+          message: lang === "th" ? '\u0E44\u0E21\u0E48\u0E40\u0E02\u0E49\u0E32\u0E43\u0E08\u0E02\u0E49\u0E2D\u0E04\u0E27\u0E32\u0E21 \u0E25\u0E2D\u0E07\u0E1E\u0E34\u0E21\u0E1E\u0E4C "\u0E01\u0E32\u0E41\u0E1F 65" \u0E2B\u0E23\u0E37\u0E2D\u0E2A\u0E48\u0E07\u0E23\u0E39\u0E1B\u0E43\u0E1A\u0E40\u0E2A\u0E23\u0E47\u0E08' : `I don't understand. Try "coffee 65" or send a receipt photo.`,
+          fallbackReason: "no_content"
+        };
+      }
+    })
+  ]
+]).commit();
+
+const SyncMembersInputSchema = z.object({
+  channel: ChannelSchema,
+  sourceChannelId: z.string(),
+  senderChannelId: z.string()
+});
+const SyncMembersOutputSchema = z.object({
+  success: z.boolean(),
+  members: z.array(z.object({
+    id: z.string(),
+    name: z.string().nullable(),
+    nickname: z.string().nullable(),
+    channelId: z.string()
+  })),
+  error: z.string().optional()
+});
+const syncMembersStep = createStep({
+  id: "sync-members",
+  description: "Fetch group members for @all resolution",
+  inputSchema: SyncMembersInputSchema,
+  outputSchema: SyncMembersOutputSchema,
+  stateSchema: MessageWorkflowStateSchema,
+  execute: async ({ inputData, setState, state }) => {
+    console.log(`
+${"=".repeat(60)}`);
+    console.log(`[STEP] sync-members`);
+    console.log(`${"=".repeat(60)}`);
+    console.log(`  Channel:  ${inputData.channel}`);
+    console.log(`  Source:   ${inputData.sourceChannelId}`);
+    console.log(`${"=".repeat(60)}
+`);
+    const context = {
+      channel: inputData.channel,
+      senderChannelId: inputData.senderChannelId,
+      sourceChannelId: inputData.sourceChannelId,
+      sourceType: "GROUP"
+    };
+    try {
+      const response = await apiRequest("GET", `/sources/${inputData.sourceChannelId}/members`, context);
+      const members = response.members || [];
+      console.log(`[sync-members] \u2705 Fetched ${members.length} members`);
+      setState({
+        ...state,
+        groupMembers: members.map((m) => ({
+          id: m.id,
+          name: m.name,
+          nickname: m.nickname
+        }))
+      });
+      return {
+        success: true,
+        members
+      };
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : "Unknown error";
+      console.error(`[sync-members] \u274C Error: ${errorMsg}`);
+      return {
+        success: false,
+        members: [],
+        error: errorMsg
+      };
+    }
+  }
+});
+
+const GroupParseTextInputSchema = z.object({
+  messageText: z.string(),
+  userCurrency: z.string().default("THB"),
+  userLanguage: z.enum(["th", "en"]).default("th"),
+  members: z.array(z.object({
+    id: z.string(),
+    name: z.string().nullable(),
+    nickname: z.string().nullable(),
+    channelId: z.string()
+  })).default([])
+});
+const GroupParseTextOutputSchema = z.object({
+  success: z.boolean(),
+  parsedExpense: ParsedExpenseSchema.nullable(),
+  isValid: z.boolean(),
+  missingFields: z.array(z.string()),
+  needsSplitInfo: z.boolean()
+  // True if no @mentions found but might need split
+});
+const groupParseTextStep = createStep({
+  id: "group-parse-text",
+  description: "Parse text message into expense data (Group - with splits)",
+  inputSchema: GroupParseTextInputSchema,
+  outputSchema: GroupParseTextOutputSchema,
+  stateSchema: MessageWorkflowStateSchema,
+  execute: async ({ inputData, setState, state }) => {
+    console.log(`
+${"=".repeat(60)}`);
+    console.log(`[STEP] group-parse-text`);
+    console.log(`${"=".repeat(60)}`);
+    console.log(`  Text: "${inputData.messageText}"`);
+    console.log(`  Members: ${inputData.members.length}`);
+    console.log(`${"=".repeat(60)}
+`);
+    const parsed = parseExpenseText(inputData.messageText);
+    if (parsed.currency === "THB" && inputData.userCurrency !== "THB") {
+      const hasExplicitCurrency = /[฿$€¥]|\b(THB|USD|EUR|JPY|AUD)\b/i.test(inputData.messageText);
+      if (!hasExplicitCurrency) {
+        parsed.currency = inputData.userCurrency;
+      }
+    }
+    const validatedTargets = [];
+    const invalidTargets = [];
+    for (const target of parsed.splitTargets) {
+      if (target.toLowerCase() === "all") {
+        validatedTargets.push("all");
+      } else {
+        const memberMatch = inputData.members.find(
+          (m) => m.name?.toLowerCase() === target.toLowerCase() || m.nickname?.toLowerCase() === target.toLowerCase()
+        );
+        if (memberMatch) {
+          validatedTargets.push(target);
+        } else {
+          invalidTargets.push(target);
+        }
+      }
+    }
+    if (invalidTargets.length > 0) {
+      console.log(`[group-parse-text] Invalid targets: ${invalidTargets.join(", ")}`);
+    }
+    const needsSplitInfo = false;
+    parsed.splitTargets = validatedTargets;
+    if (validatedTargets.length === 0) {
+      parsed.splitType = null;
+    }
+    const { isValid, missingFields } = validateParsedExpense(parsed);
+    console.log(`[group-parse-text] Parsed: ${JSON.stringify(parsed)}`);
+    console.log(`[group-parse-text] Valid: ${isValid}, Missing: ${missingFields.join(", ") || "none"}`);
+    console.log(`[group-parse-text] Split targets: ${validatedTargets.join(", ") || "none (personal)"}`);
+    const parsedExpense = {
+      description: parsed.description,
+      amount: parsed.amount,
+      currency: parsed.currency,
+      category: parsed.category,
+      date: parsed.date,
+      splitType: parsed.splitType,
+      splitTargets: parsed.splitTargets,
+      items: [],
+      payment: null,
+      metadata: void 0
+    };
+    setState({
+      ...state,
+      messageType: "expense_text",
+      parsedExpense,
+      isValid,
+      missingFields
+    });
+    return {
+      success: true,
+      parsedExpense,
+      isValid,
+      missingFields,
+      needsSplitInfo
+    };
+  }
+});
+
+const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY || "");
+const EXTRACT_TEXT_PROMPT = `Extract ALL text from this image exactly as shown.
+Include every word, number, and symbol visible.
+Return ONLY the raw text, no formatting or explanation.`;
+const categoryList = Object.keys(CATEGORIES).join("|");
+const ANALYZE_TEXT_PROMPT = `Analyze this receipt text and extract structured data as JSON.
+
+Receipt text:
+---
+{TEXT}
+---
+
+Return JSON:
+{
+  "isReceipt": true/false,
+  "storeName": "store name in English",
+  "storeNameLocalized": "original name if not English, else null",
+  "category": "${categoryList}",
+  "items": [
+    {
+      "name": "item in English",
+      "nameLocalized": "original if not English, else null",
+      "quantity": 1,
+      "unitPrice": 0.00
+    }
+  ],
+  "subtotal": 0.00,
+  "tax": 0.00,
+  "total": 0.00,
+  "currency": "THB|USD|AUD|EUR|JPY",
+  "payment": {
+    "method": "Cash|Credit|Debit|QR|PromptPay|null",
+    "cardType": "VISA|Mastercard|JCB|null",
+    "cardLast4": "1234|null",
+    "bankName": "SCB|KBank|null"
+  },
+  "metadata": {
+    "receiptNo": "receipt number|null",
+    "transactionDate": "YYYY-MM-DD|null"
+  }
+}
+
+Rules:
+- If NOT a receipt, return {"isReceipt": false}
+- Translate non-English to English in "name" fields
+- Keep original in "nameLocalized"
+- Return ONLY valid JSON, no markdown`;
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+async function downloadImage(url) {
+  const response = await fetch(url, {
+    headers: { "User-Agent": "Mozilla/5.0", "Accept": "image/*,*/*;q=0.8" }
+  });
+  if (!response.ok) throw new Error(`Failed to download image: ${response.status}`);
+  const buffer = await response.arrayBuffer();
+  return {
+    data: Buffer.from(buffer).toString("base64"),
+    mimeType: response.headers.get("content-type") || "image/jpeg"
+  };
+}
+async function callGemini(model, content, maxRetries = 3) {
+  const geminiModel = genAI.getGenerativeModel({ model });
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await geminiModel.generateContent(content);
+      return response.response.text();
+    } catch (error) {
+      const isRateLimit = error instanceof Error && (error.message.includes("429") || error.message.includes("Resource exhausted"));
+      if (isRateLimit && attempt < maxRetries) {
+        await sleep(Math.pow(2, attempt) * 1e3);
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw new Error("Max retries exceeded");
+}
+function parseJSON$2(text) {
+  let cleaned = text.trim();
+  if (cleaned.startsWith("```json")) cleaned = cleaned.slice(7);
+  else if (cleaned.startsWith("```")) cleaned = cleaned.slice(3);
+  if (cleaned.endsWith("```")) cleaned = cleaned.slice(0, -3);
+  return JSON.parse(cleaned.trim());
+}
+const GroupProcessReceiptInputSchema = z.object({
+  imageUrl: z.string().optional(),
+  imageBase64: z.string().optional(),
+  userCurrency: z.string().default("THB"),
+  splitType: z.enum(["equal", "exact", "percentage", "item"]).nullable().default(null),
+  splitTargets: z.array(z.string()).default([])
+});
+const GroupProcessReceiptOutputSchema = z.object({
+  success: z.boolean(),
+  isReceipt: z.boolean(),
+  parsedExpense: ParsedExpenseSchema.nullable(),
+  isValid: z.boolean(),
+  missingFields: z.array(z.string()),
+  needsSplitInfo: z.boolean(),
+  error: z.string().optional()
+});
+const groupProcessReceiptStep = createStep({
+  id: "group-process-receipt",
+  description: "Process receipt image using OCR (Group - with split support)",
+  inputSchema: GroupProcessReceiptInputSchema,
+  outputSchema: GroupProcessReceiptOutputSchema,
+  stateSchema: MessageWorkflowStateSchema,
+  execute: async ({ inputData, setState, state }) => {
+    console.log(`
+${"=".repeat(60)}`);
+    console.log(`[STEP] group-process-receipt`);
+    console.log(`${"=".repeat(60)}`);
+    console.log(`  ImageURL: ${inputData.imageUrl || "(base64 provided)"}`);
+    if (inputData.splitTargets.length > 0) {
+      console.log(`  Splits: ${inputData.splitTargets.join(", ")}`);
+    }
+    console.log(`${"=".repeat(60)}
+`);
+    if (!inputData.imageUrl && !inputData.imageBase64) {
+      setState({ ...state, messageType: "expense_receipt", isReceipt: false, error: "No image provided" });
+      return { success: false, isReceipt: false, parsedExpense: null, isValid: false, missingFields: [], needsSplitInfo: false, error: "No image provided" };
+    }
+    try {
+      let imageData;
+      if (inputData.imageBase64) {
+        imageData = { data: inputData.imageBase64.replace(/^data:image\/\w+;base64,/, ""), mimeType: "image/jpeg" };
+      } else {
+        imageData = await downloadImage(inputData.imageUrl);
+      }
+      console.log("[OCR] Extracting text...");
+      const rawText = await callGemini("gemini-2.0-flash", [
+        EXTRACT_TEXT_PROMPT,
+        { inlineData: { data: imageData.data, mimeType: imageData.mimeType } }
+      ]);
+      console.log("[OCR] Analyzing text...");
+      const analysisText = await callGemini("gemini-2.0-flash", [ANALYZE_TEXT_PROMPT.replace("{TEXT}", rawText)]);
+      const ocrResult = parseJSON$2(analysisText);
+      if (!ocrResult.isReceipt) {
+        setState({ ...state, messageType: "expense_receipt", isReceipt: false });
+        return { success: true, isReceipt: false, parsedExpense: null, isValid: false, missingFields: [], needsSplitInfo: false };
+      }
+      const items = (ocrResult.items || []).map((item) => ({
+        name: item.name || "Unknown",
+        nameLocalized: item.nameLocalized || null,
+        quantity: item.quantity || 1,
+        unitPrice: item.unitPrice || 0,
+        ingredientType: null
+      }));
+      const payment = ocrResult.payment;
+      const metadata = ocrResult.metadata;
+      const parsedExpense = {
+        description: ocrResult.storeName || ocrResult.storeNameLocalized || null,
+        amount: ocrResult.total || null,
+        currency: ocrResult.currency || "THB",
+        category: ocrResult.category || null,
+        date: metadata?.transactionDate || null,
+        splitType: inputData.splitType,
+        splitTargets: inputData.splitTargets,
+        items,
+        payment: payment ? {
+          method: payment.method || null,
+          cardType: payment.cardType || null,
+          cardLast4: payment.cardLast4 || null,
+          bankName: payment.bankName || null
+        } : null,
+        metadata: {
+          receiptNo: metadata?.receiptNo,
+          subtotal: ocrResult.subtotal,
+          tax: ocrResult.tax
+        }
+      };
+      const missingFields = [];
+      if (!parsedExpense.amount) missingFields.push("amount");
+      if (!parsedExpense.description) missingFields.push("description");
+      const isValid = missingFields.length === 0;
+      const needsSplitInfo = false;
+      console.log(`[OCR] \u2705 ${parsedExpense.description} | ${parsedExpense.amount} ${parsedExpense.currency}`);
+      console.log(`[OCR] Split targets: ${parsedExpense.splitTargets.join(", ") || "none"}`);
+      setState({ ...state, messageType: "expense_receipt", isReceipt: true, parsedExpense, isValid, missingFields });
+      return { success: true, isReceipt: true, parsedExpense, isValid, missingFields, needsSplitInfo };
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : "Unknown error";
+      console.error(`[OCR] \u274C Error: ${errorMsg}`);
+      setState({ ...state, messageType: "expense_receipt", isReceipt: false, error: errorMsg });
+      return { success: false, isReceipt: false, parsedExpense: null, isValid: false, missingFields: [], needsSplitInfo: false, error: errorMsg };
+    }
+  }
+});
+
+const GroupValidateInputSchema = z.object({
+  parsedExpense: ParsedExpenseSchema.nullable(),
+  isValid: z.boolean(),
+  missingFields: z.array(z.string()),
+  needsSplitInfo: z.boolean().default(false),
+  userLanguage: z.enum(["th", "en"]).default("th"),
+  userCurrency: z.string().default("THB")
+});
+const GroupValidateOutputSchema = z.object({
+  isValid: z.boolean(),
+  parsedExpense: ParsedExpenseSchema
+});
+const GroupValidateSuspendSchema = z.object({
+  prompt: z.string(),
+  missingFields: z.array(z.string())
+});
+function generateGroupMissingPrompt(parsedExpense, missingFields, needsSplitInfo, language) {
+  const prompts = [];
+  if (language === "th") {
+    if (missingFields.includes("amount") && missingFields.includes("description")) {
+      prompts.push('\u0E1A\u0E2D\u0E01\u0E27\u0E48\u0E32\u0E0B\u0E37\u0E49\u0E2D\u0E2D\u0E30\u0E44\u0E23 \u0E23\u0E32\u0E04\u0E32\u0E40\u0E17\u0E48\u0E32\u0E44\u0E2B\u0E23\u0E48? \u0E40\u0E0A\u0E48\u0E19 "\u0E01\u0E32\u0E41\u0E1F 65"');
+    } else if (missingFields.includes("amount")) {
+      prompts.push(`"${parsedExpense.description}" \u0E23\u0E32\u0E04\u0E32\u0E40\u0E17\u0E48\u0E32\u0E44\u0E2B\u0E23\u0E48?`);
+    } else if (missingFields.includes("description")) {
+      prompts.push(`${parsedExpense.amount} ${parsedExpense.currency} - \u0E08\u0E48\u0E32\u0E22\u0E04\u0E48\u0E32\u0E2D\u0E30\u0E44\u0E23?`);
+    }
+    if (needsSplitInfo) {
+      prompts.push("\u0E2B\u0E32\u0E23\u0E01\u0E31\u0E1A\u0E43\u0E04\u0E23? \u0E43\u0E0A\u0E49 @all \u0E2B\u0E23\u0E37\u0E2D @\u0E0A\u0E37\u0E48\u0E2D");
+    }
+  } else {
+    if (missingFields.includes("amount") && missingFields.includes("description")) {
+      prompts.push('What did you buy and how much? Example: "coffee 65"');
+    } else if (missingFields.includes("amount")) {
+      prompts.push(`How much was "${parsedExpense.description}"?`);
+    } else if (missingFields.includes("description")) {
+      prompts.push(`What did you spend ${parsedExpense.amount} ${parsedExpense.currency} on?`);
+    }
+    if (needsSplitInfo) {
+      prompts.push("Split with whom? Use @all or @name");
+    }
+  }
+  return prompts.join("\n");
+}
+const groupValidateStep = createStep({
+  id: "group-validate",
+  description: "Validate group expense and suspend for missing info (HITL)",
+  inputSchema: GroupValidateInputSchema,
+  outputSchema: GroupValidateOutputSchema,
+  stateSchema: MessageWorkflowStateSchema,
+  resumeSchema: ExpenseResumeSchema,
+  suspendSchema: GroupValidateSuspendSchema,
+  execute: async ({ inputData, resumeData, suspend, setState, state }) => {
+    console.log(`
+${"=".repeat(60)}`);
+    console.log(`[STEP] group-validate`);
+    console.log(`${"=".repeat(60)}`);
+    console.log(`  IsValid: ${inputData.isValid}`);
+    console.log(`  Missing: ${inputData.missingFields.join(", ") || "none"}`);
+    console.log(`  NeedsSplitInfo: ${inputData.needsSplitInfo}`);
+    if (resumeData) {
+      console.log(`  ResumeData: ${JSON.stringify(resumeData)}`);
+    }
+    console.log(`${"=".repeat(60)}
+`);
+    let parsedExpense = inputData.parsedExpense || {
+      description: null,
+      amount: null,
+      currency: inputData.userCurrency,
+      category: "Other",
+      date: null,
+      splitType: null,
+      splitTargets: [],
+      items: [],
+      payment: null,
+      metadata: void 0
+    };
+    if (resumeData) {
+      console.log(`[group-validate] Processing resume data...`);
+      if (resumeData.description) {
+        parsedExpense = { ...parsedExpense, description: resumeData.description };
+      }
+      if (resumeData.amount) {
+        parsedExpense = { ...parsedExpense, amount: resumeData.amount };
+      }
+      if (resumeData.splitTargets && resumeData.splitTargets.length > 0) {
+        parsedExpense = {
+          ...parsedExpense,
+          splitType: "equal",
+          splitTargets: resumeData.splitTargets
+        };
+      }
+      console.log(`[group-validate] After merge: ${JSON.stringify(parsedExpense)}`);
+    }
+    const missingFields = [];
+    if (!parsedExpense.amount) missingFields.push("amount");
+    if (!parsedExpense.description) missingFields.push("description");
+    const isValid = missingFields.length === 0;
+    const needsSplitInfo = inputData.needsSplitInfo && parsedExpense.splitTargets.length === 0;
+    if (!isValid || needsSplitInfo) {
+      const prompt = generateGroupMissingPrompt(
+        {
+          description: parsedExpense.description,
+          amount: parsedExpense.amount,
+          currency: parsedExpense.currency
+        },
+        missingFields,
+        needsSplitInfo,
+        inputData.userLanguage
+      );
+      console.log(`[group-validate] Suspending for: ${missingFields.join(", ")}${needsSplitInfo ? ", splitInfo" : ""}`);
+      console.log(`[group-validate] Prompt: "${prompt}"`);
+      setState({
+        ...state,
+        parsedExpense,
+        isValid: false,
+        missingFields
+      });
+      return await suspend({
+        prompt,
+        missingFields: needsSplitInfo ? [...missingFields, "splitInfo"] : missingFields
+      });
+    }
+    console.log(`[group-validate] \u2705 Validation passed`);
+    setState({
+      ...state,
+      parsedExpense,
+      isValid: true,
+      missingFields: []
+    });
+    return {
+      isValid: true,
+      parsedExpense
+    };
+  }
+});
+
+const GroupWorkflowInputSchema = z.object({
+  sourceInitialized: z.boolean(),
+  isNewSource: z.boolean(),
+  isNewUser: z.boolean()
+});
+const groupTextExpenseWorkflow = createWorkflow({
+  id: "group-text-expense",
+  inputSchema: z.any(),
+  outputSchema: MessageOutputSchema,
+  stateSchema: MessageWorkflowStateSchema
+}).map(async ({ inputData, getInitData }) => {
+  const initData = getInitData();
+  return {
+    messageText: initData.messageText || "",
+    userCurrency: initData.userCurrency,
+    userLanguage: initData.userLanguage,
+    members: inputData.members || []
+  };
+}).then(groupParseTextStep).map(async ({ inputData, getInitData }) => {
+  const initData = getInitData();
+  return {
+    parsedExpense: inputData.parsedExpense,
+    isValid: inputData.isValid,
+    missingFields: inputData.missingFields,
+    needsSplitInfo: inputData.needsSplitInfo,
+    userLanguage: initData.userLanguage,
+    userCurrency: initData.userCurrency
+  };
+}).then(groupValidateStep).map(async ({ inputData, getInitData }) => {
+  const initData = getInitData();
+  return {
+    parsedExpense: inputData.parsedExpense,
+    channel: initData.channel,
+    senderChannelId: initData.senderChannelId,
+    sourceChannelId: initData.sourceChannelId,
+    isGroup: true
+  };
+}).then(createExpenseStep).map(async ({ inputData, getStepResult, getInitData }) => {
+  const initData = getInitData();
+  const validateResult = getStepResult("group-validate");
+  return {
+    success: inputData.success,
+    expenseId: inputData.expenseId,
+    parsedExpense: validateResult.parsedExpense,
+    splits: inputData.splits,
+    error: inputData.error,
+    userLanguage: initData.userLanguage
+  };
+}).then(formatResponseStep).commit();
+const groupReceiptExpenseWorkflow = createWorkflow({
+  id: "group-receipt-expense",
+  inputSchema: z.any(),
+  outputSchema: MessageOutputSchema,
+  stateSchema: MessageWorkflowStateSchema
+}).map(async ({ getInitData }) => {
+  const initData = getInitData();
+  const splitTargets = [];
+  const text = initData.messageText || "";
+  const splitMatches = text.match(/@(\w+)/g);
+  if (splitMatches) {
+    for (const m of splitMatches) {
+      splitTargets.push(m.slice(1));
+    }
+  }
+  if (/หารกัน|แบ่งกัน|ทุกคน/i.test(text) && !splitTargets.includes("all")) {
+    splitTargets.push("all");
+  }
+  return {
+    imageUrl: initData.imageUrl,
+    imageBase64: initData.imageBase64,
+    userCurrency: initData.userCurrency,
+    splitType: splitTargets.length > 0 ? "equal" : null,
+    splitTargets
+  };
+}).then(groupProcessReceiptStep).branch([
+  // Not a receipt - return error
+  [
+    async ({ inputData }) => !inputData.isReceipt,
+    createStep({
+      id: "group-not-a-receipt",
+      inputSchema: z.any(),
+      outputSchema: MessageOutputSchema,
+      execute: async ({ getInitData }) => {
+        const initData = getInitData();
+        const lang = initData.userLanguage;
+        return {
+          success: false,
+          status: "failed",
+          message: lang === "th" ? "\u0E44\u0E21\u0E48\u0E1E\u0E1A\u0E43\u0E1A\u0E40\u0E2A\u0E23\u0E47\u0E08\u0E43\u0E19\u0E23\u0E39\u0E1B \u0E01\u0E23\u0E38\u0E13\u0E32\u0E2A\u0E48\u0E07\u0E23\u0E39\u0E1B\u0E43\u0E1A\u0E40\u0E2A\u0E23\u0E47\u0E08\u0E17\u0E35\u0E48\u0E0A\u0E31\u0E14\u0E40\u0E08\u0E19" : "This does not appear to be a receipt. Please send a clear photo of a receipt."
+        };
+      }
+    })
+  ],
+  // Is a receipt - continue with validation
+  [
+    async ({ inputData }) => inputData.isReceipt,
+    createWorkflow({
+      id: "group-receipt-valid-path",
+      inputSchema: z.any(),
+      outputSchema: MessageOutputSchema,
+      stateSchema: MessageWorkflowStateSchema
+    }).map(async ({ inputData, getInitData }) => {
+      const initData = getInitData();
+      return {
+        parsedExpense: inputData.parsedExpense,
+        isValid: inputData.isValid,
+        missingFields: inputData.missingFields,
+        needsSplitInfo: inputData.needsSplitInfo,
+        userLanguage: initData.userLanguage,
+        userCurrency: initData.userCurrency
+      };
+    }).then(groupValidateStep).map(async ({ inputData, getInitData }) => {
+      const initData = getInitData();
+      return {
+        parsedExpense: inputData.parsedExpense,
+        channel: initData.channel,
+        senderChannelId: initData.senderChannelId,
+        sourceChannelId: initData.sourceChannelId,
+        isGroup: true,
+        imageUrl: initData.imageUrl
+      };
+    }).then(createExpenseStep).map(async ({ inputData, getStepResult, getInitData }) => {
+      const initData = getInitData();
+      const validateResult = getStepResult("group-validate");
+      return {
+        success: inputData.success,
+        expenseId: inputData.expenseId,
+        parsedExpense: validateResult.parsedExpense,
+        splits: inputData.splits,
+        error: inputData.error,
+        userLanguage: initData.userLanguage
+      };
+    }).then(formatResponseStep).commit()
+  ]
+]).commit();
+const groupWorkflow = createWorkflow({
+  id: "group-workflow",
+  inputSchema: GroupWorkflowInputSchema,
+  outputSchema: MessageOutputSchema,
+  stateSchema: MessageWorkflowStateSchema
+}).map(async ({ getInitData }) => {
+  const initData = getInitData();
+  return {
+    channel: initData.channel,
+    sourceChannelId: initData.sourceChannelId,
+    senderChannelId: initData.senderChannelId
+  };
+}).then(syncMembersStep).branch([
+  // Text expense path
+  [
+    async ({ getInitData }) => {
+      const initData = getInitData();
+      return !initData.imageUrl && !initData.imageBase64 && !!initData.messageText;
+    },
+    groupTextExpenseWorkflow
+  ],
+  // Receipt expense path
+  [
+    async ({ getInitData }) => {
+      const initData = getInitData();
+      return !!(initData.imageUrl || initData.imageBase64);
+    },
+    groupReceiptExpenseWorkflow
+  ],
+  // No content - fallback
+  [
+    async () => true,
+    createStep({
+      id: "group-no-content",
+      inputSchema: z.any(),
+      outputSchema: MessageOutputSchema,
+      execute: async ({ getInitData }) => {
+        const initData = getInitData();
+        const lang = initData.userLanguage;
+        return {
+          success: false,
+          status: "fallback",
+          message: lang === "th" ? '\u0E44\u0E21\u0E48\u0E40\u0E02\u0E49\u0E32\u0E43\u0E08\u0E02\u0E49\u0E2D\u0E04\u0E27\u0E32\u0E21 \u0E25\u0E2D\u0E07\u0E1E\u0E34\u0E21\u0E1E\u0E4C "\u0E01\u0E32\u0E41\u0E1F 65 @all" \u0E2B\u0E23\u0E37\u0E2D\u0E2A\u0E48\u0E07\u0E23\u0E39\u0E1B\u0E43\u0E1A\u0E40\u0E2A\u0E23\u0E47\u0E08' : `I don't understand. Try "coffee 65 @all" or send a receipt photo.`,
+          fallbackReason: "no_content"
+        };
+      }
+    })
+  ]
+]).commit();
+
+const messageWorkflow = createWorkflow({
+  id: "message-workflow",
+  inputSchema: MessageInputSchema,
+  outputSchema: MessageOutputSchema,
+  stateSchema: MessageWorkflowStateSchema
+}).then(ensureSourceInitStep).branch([
+  // DM path
+  [
+    async ({ getInitData }) => {
+      const initData = getInitData();
+      return !initData.isGroup;
+    },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    dmWorkflow
+  ],
+  // Group path
+  [
+    async ({ getInitData }) => {
+      const initData = getInitData();
+      return initData.isGroup;
+    },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    groupWorkflow
+  ]
+]).commit();
+
+({
+  // Group activation settings
+  groupActivation: {
+    mentionPatterns: process.env.GROUP_MENTION_PATTERNS?.split(",") || ["@billog", "billog"]
+  }
+});
+const storage = new LibSQLStore({
+  id: "billog-mastra",
+  url: process.env.MASTRA_DATABASE_URL || "file:./data/mastra.db"
+});
 const mastra = new Mastra({
   agents: {
     billog: billogAgent
-  }
+  },
+  workflows: {
+    messageWorkflow
+  },
+  storage
 });
 
 function normalizeStudioBase(studioBase) {
