@@ -339,19 +339,9 @@ export class GatewayRouter {
       await this.sendResponse(message, { text: output.message });
       message.replyToken = undefined; // Clear for subsequent push messages
 
-      // Run insights agent in parallel for expense messages
-      if (this.insightsAgent && output.expenseId) {
-        console.log(`[${sessionKey}] 💡 Running Insights for expense`);
-        try {
-          const insightsResponse = await this.callInsightsAgent(message, context);
-          if (insightsResponse && insightsResponse.trim() !== 'SILENT') {
-            console.log(`[${sessionKey}] 💡 Insights: ${insightsResponse.substring(0, 100)}`);
-            await this.sendResponse(message, { text: insightsResponse });
-          }
-        } catch (error) {
-          console.error(`[${sessionKey}] Insights error (non-fatal):`, error);
-        }
-      }
+      // Note: Insights agent runs in handleWithAgent (parallel mode)
+      // For workflow success, we skip Insights here to avoid duplicates
+      // TODO: Re-enable when we want proactive duplicate warnings for workflow expenses
     } else if (result.status === 'suspended') {
       // Store suspended run for resume
       const suspendPayload = result.suspendPayload as {
