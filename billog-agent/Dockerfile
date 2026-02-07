@@ -22,7 +22,7 @@ COPY package.json ./
 COPY pnpm-lock.yaml* ./
 COPY .npmrc* ./
 
-# Install dependencies
+# Install all dependencies (including dev for mastra CLI)
 RUN pnpm install --prod=false
 
 # ===========================================
@@ -39,10 +39,10 @@ RUN apk add --no-cache git
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
-# Build TypeScript
+# Build TypeScript (custom server)
 RUN pnpm build
 
-# Prune dev dependencies
+# Prune dev dependencies (mastra CLI is now in dependencies)
 RUN pnpm prune --prod
 
 # ===========================================
@@ -80,5 +80,5 @@ EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD wget --no-verbose --tries=1 --spider http://localhost:3000/health || exit 1
 
-# Start the server
+# Start the server (runs both custom server + mastra)
 CMD ["node", "dist/server.js"]

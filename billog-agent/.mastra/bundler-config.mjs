@@ -1,6 +1,7 @@
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
 import jwt from 'jsonwebtoken';
+import { Index } from '@upstash/vector';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
 const BILLOG_API_URL = process.env.BILLOG_API_URL || "http://localhost:8000";
@@ -121,6 +122,252 @@ function getApiContext(input, requestContext) {
   return { channel, senderChannelId, sourceChannelId, sourceType };
 }
 
+const PERISHABLE_WINDOWS = {
+  fresh_produce: 7,
+  // banana, vegetables, leafy greens
+  dairy: 14,
+  // milk, yogurt, cheese
+  bread: 5,
+  // bread, pastries
+  meat_seafood: 3,
+  // chicken, fish, shrimp
+  eggs: 21,
+  // eggs
+  frozen: 60,
+  // frozen items
+  pantry: 180,
+  // rice, pasta, canned goods
+  non_food: 0
+  // household items (no check)
+};
+const ITEM_TYPE_PATTERNS = {
+  fresh_produce: [
+    // Fruits
+    /banana|กล้วย/i,
+    /apple|แอปเปิ้ล/i,
+    /orange|ส้ม/i,
+    /mango|มะม่วง/i,
+    /watermelon|แตงโม/i,
+    /strawberry|สตรอว์เบอร์รี่/i,
+    /grape|องุ่น/i,
+    /pineapple|สับปะรด/i,
+    /papaya|มะละกอ/i,
+    /longan|ลำไย/i,
+    /durian|ทุเรียน/i,
+    /lychee|ลิ้นจี่/i,
+    /rambutan|เงาะ/i,
+    /mangosteen|มังคุด/i,
+    // Vegetables
+    /lettuce|ผักกาด/i,
+    /spinach|ผักโขม/i,
+    /cabbage|กะหล่ำปลี/i,
+    /carrot|แครอท/i,
+    /tomato|มะเขือเทศ/i,
+    /cucumber|แตงกวา/i,
+    /broccoli|บร็อคโคลี่/i,
+    /chinese|ผักจีน|ผักคะน้า|ผักกาดขาว/i,
+    /morning glory|ผักบุ้ง/i,
+    /basil|โหระพา|กะเพรา/i,
+    /vegetable|ผัก/i,
+    /salad|สลัด/i,
+    /herb|สมุนไพร/i,
+    /fresh|สด/i
+  ],
+  dairy: [
+    /milk|นม/i,
+    /yogurt|โยเกิร์ต/i,
+    /cheese|ชีส/i,
+    /cream|ครีม/i,
+    /butter|เนย/i,
+    /dairy|นม/i,
+    /kefir/i
+  ],
+  bread: [
+    /bread|ขนมปัง/i,
+    /bakery|เบเกอรี่/i,
+    /pastry|เพสตรี้/i,
+    /croissant|ครัวซองต์/i,
+    /donut|โดนัท/i,
+    /cake|เค้ก/i,
+    /bun|ซาลาเปา|ปัง/i,
+    /toast|โทสต์/i
+  ],
+  meat_seafood: [
+    /chicken|ไก่/i,
+    /pork|หมู/i,
+    /beef|เนื้อ/i,
+    /fish|ปลา/i,
+    /shrimp|กุ้ง/i,
+    /crab|ปู/i,
+    /squid|หมึก/i,
+    /meat|เนื้อสัตว์/i,
+    /seafood|อาหารทะเล/i,
+    /shellfish|หอย/i,
+    /salmon|แซลมอน/i,
+    /tuna|ทูน่า/i
+  ],
+  eggs: [
+    /egg|ไข่/i
+  ],
+  frozen: [
+    /frozen|แช่แข็ง/i,
+    /ice cream|ไอศกรีม/i
+  ],
+  pantry: [
+    /rice|ข้าว/i,
+    /pasta|พาสต้า/i,
+    /noodle|เส้น|บะหมี่/i,
+    /can|กระป๋อง/i,
+    /sauce|ซอส/i,
+    /oil|น้ำมัน/i,
+    /sugar|น้ำตาล/i,
+    /salt|เกลือ/i,
+    /flour|แป้ง/i,
+    /instant|สำเร็จรูป/i,
+    /snack|ขนม/i,
+    /chips|มันฝรั่ง/i,
+    /coffee|กาแฟ/i,
+    /tea|ชา/i,
+    /cereal|ซีเรียล/i
+  ],
+  non_food: [
+    /soap|สบู่/i,
+    /shampoo|แชมพู/i,
+    /detergent|ผงซักฟอก/i,
+    /tissue|ทิชชู่|กระดาษ/i,
+    /toothpaste|ยาสีฟัน/i,
+    /cleaning|ทำความสะอาด/i,
+    /household|ของใช้/i
+  ]
+};
+function detectItemType(itemName) {
+  const normalizedName = itemName.toLowerCase().trim();
+  for (const [type, patterns] of Object.entries(ITEM_TYPE_PATTERNS)) {
+    for (const pattern of patterns) {
+      if (pattern.test(normalizedName)) {
+        return type;
+      }
+    }
+  }
+  return "pantry";
+}
+function getPerishableWindow(itemType) {
+  return PERISHABLE_WINDOWS[itemType];
+}
+
+let vectorIndex = null;
+function getExpenseItemVectorIndex() {
+  if (vectorIndex) {
+    return vectorIndex;
+  }
+  const url = process.env.UPSTASH_VECTOR_REST_URL;
+  const token = process.env.UPSTASH_VECTOR_REST_TOKEN;
+  if (!url || !token) {
+    throw new Error(
+      "Missing Upstash Vector configuration. Set UPSTASH_VECTOR_REST_URL and UPSTASH_VECTOR_REST_TOKEN."
+    );
+  }
+  vectorIndex = new Index({
+    url,
+    token
+  });
+  console.log("[Vector] Upstash Vector index initialized");
+  return vectorIndex;
+}
+function isVectorStoreConfigured() {
+  return !!(process.env.UPSTASH_VECTOR_REST_URL && process.env.UPSTASH_VECTOR_REST_TOKEN);
+}
+async function saveExpenseItemEmbeddings(expenseId, items, sourceId, date, paidBy) {
+  if (!isVectorStoreConfigured()) {
+    console.log("[Vector] Skipping save - vector store not configured");
+    return;
+  }
+  const index = getExpenseItemVectorIndex();
+  const embeddings = items.map((item, idx) => {
+    const searchText = item.nameLocalized ? `${item.name} ${item.nameLocalized}` : item.name;
+    const metadata = {
+      name: item.name,
+      nameLocalized: item.nameLocalized,
+      sourceId,
+      date,
+      expenseId,
+      quantity: item.quantity,
+      unit: item.unit,
+      unitPrice: item.unitPrice,
+      totalPrice: item.totalPrice ?? item.quantity * item.unitPrice,
+      itemType: detectItemType(item.name),
+      paidBy
+    };
+    return {
+      id: `${expenseId}-item-${idx}`,
+      data: searchText,
+      metadata
+    };
+  });
+  try {
+    await index.upsert(embeddings);
+    console.log(`[Vector] Saved ${embeddings.length} item embeddings for expense ${expenseId}`);
+  } catch (error) {
+    console.error(`[Vector] Failed to save embeddings:`, error);
+  }
+}
+function daysBetween(dateStr, now) {
+  const date = new Date(dateStr);
+  const diffTime = now.getTime() - date.getTime();
+  return Math.floor(diffTime / (1e3 * 60 * 60 * 24));
+}
+async function searchSimilarItems(query, sourceId, lookbackDays = 14, topK = 10) {
+  if (!isVectorStoreConfigured()) {
+    console.log("[Vector] Skipping search - vector store not configured");
+    return { found: false, matches: [] };
+  }
+  const index = getExpenseItemVectorIndex();
+  const now = /* @__PURE__ */ new Date();
+  const cutoffDate = /* @__PURE__ */ new Date();
+  cutoffDate.setDate(cutoffDate.getDate() - lookbackDays);
+  try {
+    const results = await index.query({
+      data: query,
+      topK,
+      filter: `sourceId = '${sourceId}'`,
+      includeMetadata: true
+    });
+    const matches = results.filter((r) => {
+      const metadata = r.metadata;
+      const itemDate = new Date(metadata.date);
+      return itemDate >= cutoffDate;
+    }).filter((r) => r.score >= 0.7).map((r) => {
+      const metadata = r.metadata;
+      return {
+        id: r.id,
+        name: metadata.name,
+        nameLocalized: metadata.nameLocalized,
+        date: metadata.date,
+        quantity: metadata.quantity,
+        unit: metadata.unit,
+        totalPrice: metadata.totalPrice,
+        expenseId: metadata.expenseId,
+        itemType: metadata.itemType,
+        similarity: r.score,
+        daysSince: daysBetween(metadata.date, now),
+        paidBy: metadata.paidBy
+      };
+    });
+    if (matches.length === 0) {
+      return { found: false, matches: [] };
+    }
+    matches.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    return {
+      found: true,
+      matches,
+      lastPurchase: matches[0]
+    };
+  } catch (error) {
+    console.error(`[Vector] Search failed:`, error);
+    return { found: false, matches: [] };
+  }
+}
+
 const ExpenseItemSchema = z.object({
   name: z.string().describe("Item name in English (default language)"),
   nameLocalized: z.string().optional().describe("Original language name (Thai, Japanese, etc.)"),
@@ -237,6 +484,11 @@ ${"=".repeat(60)}`);
         Object.assign(expenseMetadata, input.metadata);
       }
       const expenseDate = input.date || input.metadata?.transactionDate || void 0;
+      const expenseItems = input.items && input.items.length > 0 ? input.items : [{
+        name: input.description,
+        quantity: 1,
+        unitPrice: input.amount
+      }];
       const response = await apiRequest("POST", "/expenses", context, {
         channel,
         senderChannelId,
@@ -250,7 +502,7 @@ ${"=".repeat(60)}`);
         // TODO: implement category name-to-ID resolution
         splitType: input.splitType,
         splits: input.splits,
-        items: input.items,
+        items: expenseItems,
         notes: input.notes,
         metadata: Object.keys(expenseMetadata).length > 0 ? expenseMetadata : void 0,
         // Receipt data from OCR - creates Receipt record after expense
@@ -264,6 +516,25 @@ ${"=".repeat(60)}`);
         };
       }
       console.log(`[TOOL] \u2705 create-expense SUCCESS: EX:${response.expense.id}`);
+      if (isVectorStoreConfigured()) {
+        const vectorDate = response.expense.date || (/* @__PURE__ */ new Date()).toISOString();
+        const paidBy = senderChannelId;
+        saveExpenseItemEmbeddings(
+          response.expense.id,
+          expenseItems.map((item) => ({
+            name: item.name,
+            nameLocalized: item.nameLocalized,
+            quantity: item.quantity || 1,
+            unit: void 0,
+            // Not in current schema
+            unitPrice: item.unitPrice,
+            totalPrice: (item.quantity || 1) * item.unitPrice
+          })),
+          sourceChannelId,
+          vectorDate,
+          paidBy
+        ).catch((err) => console.error("[Vector] Embedding save error:", err));
+      }
       const formattedAmount = formatAmount(response.expense.amount, response.expense.currency);
       let message = `${response.expense.description} | ${formattedAmount}`;
       message += `
@@ -1363,10 +1634,10 @@ const ReceiptMetadataSchema = z.object({
   points: z.string().nullable()
 });
 const categoryList$2 = Object.keys(CATEGORIES).join("|");
-const EXTRACT_TEXT_PROMPT$2 = `Extract ALL text from this image exactly as shown.
+const EXTRACT_TEXT_PROMPT$1 = `Extract ALL text from this image exactly as shown.
 Include every word, number, and symbol visible.
 Return ONLY the raw text, no formatting or explanation.`;
-const ANALYZE_TEXT_PROMPT$2 = `Analyze this receipt text and extract structured data as JSON.
+const ANALYZE_TEXT_PROMPT$1 = `Analyze this receipt text and extract structured data as JSON.
 
 Receipt text:
 ---
@@ -1516,12 +1787,12 @@ Only after create-expense returns an expenseId can you confirm the expense was r
       const image = await downloadImage$2(input.imageUrl);
       console.log("[OCR] Step 1: Extracting text...");
       const rawText = await callGemini$2("gemini-2.0-flash", [
-        EXTRACT_TEXT_PROMPT$2,
+        EXTRACT_TEXT_PROMPT$1,
         { inlineData: { data: image.data, mimeType: image.mimeType } }
       ]);
       console.log(`[OCR] Extracted ${rawText.length} chars`);
       console.log("[OCR] Step 2: Analyzing text...");
-      const analyzePrompt = ANALYZE_TEXT_PROMPT$2.replace("{TEXT}", rawText);
+      const analyzePrompt = ANALYZE_TEXT_PROMPT$1.replace("{TEXT}", rawText);
       const analysisText = await callGemini$2("gemini-2.0-flash", [analyzePrompt]);
       const result = parseJSON$2(analysisText);
       console.log(`[OCR] isReceipt: ${result.isReceipt}, items: ${result.items?.length || 0}`);
@@ -1585,18 +1856,9 @@ Only after create-expense returns an expenseId can you confirm the expense was r
 const extractRawTextTool = extractReceiptTool;
 
 const genAI$1 = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY || "");
-const EXTRACT_TEXT_PROMPT$1 = `Extract ALL text from this image exactly as shown.
-Include every word, number, and symbol visible.
-Return ONLY the raw text, no formatting or explanation.`;
 const categoryList$1 = Object.keys(CATEGORIES).join("|");
-const ANALYZE_TEXT_PROMPT$1 = `Analyze this receipt text and extract structured data as JSON.
+const OCR_PROMPT = `Extract and analyze this receipt image. Return JSON only.
 
-Receipt text:
----
-{TEXT}
----
-
-Return JSON:
 {
   "isReceipt": true/false,
   "storeName": "store name in English",
@@ -1751,15 +2013,11 @@ ${"=".repeat(60)}`);
     try {
       console.log("[Receipt] Step 1: OCR extraction...");
       const image = await downloadImage$1(input.imageUrl);
-      console.log("[Receipt] Extracting text...");
-      const rawText = await callGemini$1("gemini-2.0-flash", [
-        EXTRACT_TEXT_PROMPT$1,
+      console.log("[Receipt] Processing receipt...");
+      const analysisText = await callGemini$1("gemini-2.0-flash", [
+        OCR_PROMPT,
         { inlineData: { data: image.data, mimeType: image.mimeType } }
       ]);
-      console.log(`[Receipt] Extracted ${rawText.length} chars`);
-      console.log("[Receipt] Analyzing text...");
-      const analyzePrompt = ANALYZE_TEXT_PROMPT$1.replace("{TEXT}", rawText);
-      const analysisText = await callGemini$1("gemini-2.0-flash", [analyzePrompt]);
       const ocrResult = parseJSON$1(analysisText);
       console.log(`[Receipt] isReceipt: ${ocrResult.isReceipt}, items: ${ocrResult.items?.length || 0}`);
       if (!ocrResult.isReceipt) {
@@ -1785,6 +2043,19 @@ ${"=".repeat(60)}`);
         Object.assign(expenseMetadata, metadata);
       }
       const expenseDate = metadata?.transactionDate || void 0;
+      const expenseItems = items.length > 0 ? items.map((item) => ({
+        name: item.name || "Unknown",
+        nameLocalized: item.nameLocalized || null,
+        quantity: item.quantity || 1,
+        unitPrice: item.unitPrice || 0,
+        ingredientType: item.ingredientType || null
+      })) : [{
+        name: storeName,
+        nameLocalized: null,
+        quantity: 1,
+        unitPrice: total,
+        ingredientType: null
+      }];
       const response = await apiRequest("POST", "/expenses", context, {
         channel,
         senderChannelId,
@@ -1796,13 +2067,7 @@ ${"=".repeat(60)}`);
         date: expenseDate,
         splitType: input.splitType,
         splits: input.splits,
-        items: items.map((item) => ({
-          name: item.name || "Unknown",
-          nameLocalized: item.nameLocalized || null,
-          quantity: item.quantity || 1,
-          unitPrice: item.unitPrice || 0,
-          ingredientType: item.ingredientType || null
-        })),
+        items: expenseItems,
         notes: input.notes,
         metadata: Object.keys(expenseMetadata).length > 0 ? expenseMetadata : void 0,
         // Receipt data for creating Receipt record
@@ -1829,6 +2094,23 @@ ${"=".repeat(60)}`);
         };
       }
       console.log(`[Receipt] \u2705 SUCCESS: EX:${response.expense.id}`);
+      if (isVectorStoreConfigured()) {
+        const embeddingDate = response.expense.date || (/* @__PURE__ */ new Date()).toISOString();
+        saveExpenseItemEmbeddings(
+          response.expense.id,
+          expenseItems.map((item) => ({
+            name: item.name || "Unknown",
+            nameLocalized: item.nameLocalized || void 0,
+            quantity: item.quantity || 1,
+            unitPrice: item.unitPrice || 0,
+            totalPrice: (item.quantity || 1) * (item.unitPrice || 0)
+          })),
+          sourceChannelId,
+          embeddingDate,
+          senderChannelId
+          // Who paid
+        ).catch((err) => console.error("[Vector] Embedding save error:", err));
+      }
       const formattedAmount = formatAmount(response.expense.amount, response.expense.currency);
       let message = `${storeName} | ${formattedAmount}`;
       message += `
@@ -2041,6 +2323,11 @@ ${"=".repeat(60)}`);
       sourceChannelId,
       sourceType: isGroup ? "GROUP" : "DM"
     };
+    const expenseItem = {
+      name: parsed.description,
+      quantity: 1,
+      unitPrice: parsed.amount
+    };
     try {
       const response = await apiRequest("POST", "/expenses", context, {
         channel,
@@ -2052,7 +2339,9 @@ ${"=".repeat(60)}`);
         currency: parsed.currency,
         date: parsed.date,
         splitType: parsed.splitType,
-        splits: parsed.splitTargets.map((target) => ({ target }))
+        splits: parsed.splitTargets.map((target) => ({ target })),
+        // Always include items - even single item purchases
+        items: [expenseItem]
       });
       if (!response.expense?.id) {
         console.error(`[TextExpense] \u274C FAILED: No expenseId in response`);
@@ -2062,6 +2351,17 @@ ${"=".repeat(60)}`);
         };
       }
       console.log(`[TextExpense] \u2705 SUCCESS: EX:${response.expense.id}`);
+      if (isVectorStoreConfigured()) {
+        const expenseDate = response.expense.date || (/* @__PURE__ */ new Date()).toISOString();
+        saveExpenseItemEmbeddings(
+          response.expense.id,
+          [expenseItem],
+          sourceChannelId,
+          expenseDate,
+          senderChannelId
+          // Who paid
+        ).catch((err) => console.error("[Vector] Embedding save error:", err));
+      }
       const formattedAmount = formatAmount(response.expense.amount, response.expense.currency);
       let message = `${response.expense.description} | ${formattedAmount}`;
       message += `
@@ -2582,6 +2882,246 @@ Use when user says "speak English", "speak Thai", "use Thai", etc.`,
   }
 });
 
+const searchSimilarPurchasesTool = createTool({
+  id: "search-similar-purchases",
+  description: `Semantic search for similar items in purchase history.
+Works across languages: "banana" matches "\u0E01\u0E25\u0E49\u0E27\u0E22", "milk" matches "\u0E19\u0E21".
+Use this to check if user recently bought an item.
+
+Returns matches sorted by date (most recent first).`,
+  inputSchema: z.object({
+    query: z.string().describe('Item to search for: "banana", "\u0E01\u0E25\u0E49\u0E27\u0E22", "milk"'),
+    lookbackDays: z.number().default(14).describe("Days to look back (default: 14)")
+  }),
+  outputSchema: z.object({
+    found: z.boolean(),
+    message: z.string(),
+    matches: z.array(z.object({
+      name: z.string(),
+      nameLocalized: z.string().optional(),
+      date: z.string(),
+      quantity: z.number(),
+      unit: z.string().optional(),
+      totalPrice: z.number(),
+      expenseId: z.string(),
+      itemType: z.string(),
+      daysSince: z.number(),
+      similarity: z.number(),
+      paidBy: z.string().optional()
+    })),
+    lastPurchase: z.object({
+      name: z.string(),
+      date: z.string(),
+      quantity: z.number(),
+      unit: z.string().optional(),
+      totalPrice: z.number(),
+      daysSince: z.number()
+    }).optional()
+  }),
+  execute: async (input, ctx) => {
+    const reqCtx = ctx?.requestContext;
+    const sourceChannelId = reqCtx?.get("sourceChannelId");
+    console.log(`
+${"=".repeat(60)}`);
+    console.log(`[TOOL] \u{1F50D} search-similar-purchases CALLED`);
+    console.log(`${"=".repeat(60)}`);
+    console.log(`  Query:        "${input.query}"`);
+    console.log(`  Lookback:     ${input.lookbackDays} days`);
+    console.log(`  SourceId:     ${sourceChannelId}`);
+    console.log(`${"=".repeat(60)}
+`);
+    if (!sourceChannelId) {
+      console.error(`[Insights] \u274C FAILED: Missing sourceChannelId`);
+      return {
+        found: false,
+        message: "Cannot search - missing context.",
+        matches: []
+      };
+    }
+    const result = await searchSimilarItems(
+      input.query,
+      sourceChannelId,
+      input.lookbackDays
+    );
+    if (!result.found) {
+      console.log(`[Insights] No matches found for "${input.query}"`);
+      return {
+        found: false,
+        message: `No recent purchases of "${input.query}" found.`,
+        matches: []
+      };
+    }
+    const { lastPurchase } = result;
+    console.log(`[Insights] Found ${result.matches.length} matches, last: ${lastPurchase?.name} (${lastPurchase?.daysSince} days ago)`);
+    return {
+      found: true,
+      message: lastPurchase ? `Found ${lastPurchase.name} purchased ${lastPurchase.daysSince} days ago (${lastPurchase.quantity} ${lastPurchase.unit || "units"})` : `Found ${result.matches.length} matches`,
+      matches: result.matches,
+      lastPurchase: lastPurchase ? {
+        name: lastPurchase.name,
+        date: lastPurchase.date,
+        quantity: lastPurchase.quantity,
+        unit: lastPurchase.unit,
+        totalPrice: lastPurchase.totalPrice,
+        daysSince: lastPurchase.daysSince
+      } : void 0
+    };
+  }
+});
+const getPerishableWindowTool = createTool({
+  id: "get-perishable-window",
+  description: `Get the typical freshness window for an item type.
+Use this to determine if a duplicate purchase warning is relevant.
+
+Item types:
+- fresh_produce: 7 days (banana, vegetables)
+- dairy: 14 days (milk, yogurt)
+- bread: 5 days (bread, pastries)
+- meat_seafood: 3 days (chicken, fish)
+- eggs: 21 days
+- frozen: 60 days
+- pantry: 180 days (rice, pasta)
+- non_food: 0 (no check)`,
+  inputSchema: z.object({
+    itemType: z.enum([
+      "fresh_produce",
+      "dairy",
+      "bread",
+      "meat_seafood",
+      "eggs",
+      "frozen",
+      "pantry",
+      "non_food"
+    ]).describe("The item type to get window for")
+  }),
+  outputSchema: z.object({
+    days: z.number(),
+    shouldCheck: z.boolean()
+  }),
+  execute: async (input) => {
+    const days = getPerishableWindow(input.itemType);
+    return {
+      days,
+      shouldCheck: input.itemType !== "non_food"
+    };
+  }
+});
+const detectItemTypeTool = createTool({
+  id: "detect-item-type",
+  description: `Detect the perishable type from an item name.
+Supports English and Thai. Returns the item type and freshness window.`,
+  inputSchema: z.object({
+    itemName: z.string().describe("Item name to detect type for")
+  }),
+  outputSchema: z.object({
+    itemType: z.string(),
+    freshnessWindow: z.number(),
+    shouldCheck: z.boolean()
+  }),
+  execute: async (input) => {
+    const itemType = detectItemType(input.itemName);
+    const freshnessWindow = getPerishableWindow(itemType);
+    return {
+      itemType,
+      freshnessWindow,
+      shouldCheck: itemType !== "non_food"
+    };
+  }
+});
+const checkDuplicatePurchaseTool = createTool({
+  id: "check-duplicate-purchase",
+  description: `Check if user recently bought a similar item within its freshness window.
+Combines search + perishable check. Returns advisory if duplicate found.
+
+Call this when user records a new expense to check for duplicates.`,
+  inputSchema: z.object({
+    items: z.array(z.object({
+      name: z.string(),
+      nameLocalized: z.string().optional()
+    })).describe("Items being purchased")
+  }),
+  outputSchema: z.object({
+    hasDuplicates: z.boolean(),
+    duplicates: z.array(z.object({
+      itemName: z.string(),
+      lastPurchase: z.object({
+        name: z.string(),
+        date: z.string(),
+        quantity: z.number(),
+        daysSince: z.number()
+      }),
+      freshnessWindow: z.number(),
+      isWithinWindow: z.boolean(),
+      message: z.string()
+    })),
+    advisoryMessage: z.string().nullable()
+  }),
+  execute: async (input, ctx) => {
+    const reqCtx = ctx?.requestContext;
+    const sourceChannelId = reqCtx?.get("sourceChannelId");
+    console.log(`
+${"=".repeat(60)}`);
+    console.log(`[TOOL] \u{1F504} check-duplicate-purchase CALLED`);
+    console.log(`${"=".repeat(60)}`);
+    console.log(`  Items:    ${input.items.map((i) => i.name).join(", ")}`);
+    console.log(`  SourceId: ${sourceChannelId}`);
+    console.log(`${"=".repeat(60)}
+`);
+    if (!sourceChannelId) {
+      return {
+        hasDuplicates: false,
+        duplicates: [],
+        advisoryMessage: null
+      };
+    }
+    const duplicates = [];
+    for (const item of input.items) {
+      const searchQuery = item.nameLocalized ? `${item.name} ${item.nameLocalized}` : item.name;
+      const itemType = detectItemType(item.name);
+      const freshnessWindow = getPerishableWindow(itemType);
+      if (itemType === "non_food") continue;
+      const result = await searchSimilarItems(
+        searchQuery,
+        sourceChannelId,
+        freshnessWindow
+        // Use freshness window as lookback
+      );
+      if (result.found && result.lastPurchase) {
+        const isWithinWindow = result.lastPurchase.daysSince <= freshnessWindow;
+        duplicates.push({
+          itemName: item.name,
+          lastPurchase: {
+            name: result.lastPurchase.name,
+            date: result.lastPurchase.date,
+            quantity: result.lastPurchase.quantity,
+            daysSince: result.lastPurchase.daysSince
+          },
+          freshnessWindow,
+          isWithinWindow,
+          message: isWithinWindow ? `You bought ${result.lastPurchase.name} ${result.lastPurchase.daysSince} days ago (${result.lastPurchase.quantity} ${result.lastPurchase.unit || "units"}). Still have some?` : `Last purchase was ${result.lastPurchase.daysSince} days ago (outside ${freshnessWindow}-day window)`
+        });
+      }
+    }
+    const relevantDuplicates = duplicates.filter((d) => d.isWithinWindow);
+    let advisoryMessage = null;
+    if (relevantDuplicates.length > 0) {
+      if (relevantDuplicates.length === 1) {
+        const d = relevantDuplicates[0];
+        advisoryMessage = `\u26A0\uFE0F Heads up! ${d.message}`;
+      } else {
+        advisoryMessage = `\u26A0\uFE0F Heads up! You recently bought:
+` + relevantDuplicates.map((d) => `\u2022 ${d.lastPurchase.name} (${d.lastPurchase.daysSince} days ago)`).join("\n");
+      }
+    }
+    console.log(`[Insights] Found ${relevantDuplicates.length} relevant duplicates`);
+    return {
+      hasDuplicates: relevantDuplicates.length > 0,
+      duplicates,
+      advisoryMessage
+    };
+  }
+});
+
 const TEMPLATES = {
   // Expense creation
   expenseCreated: (data) => `${data.description} | ${data.amount}
@@ -2690,4 +3230,4 @@ const responses = new ResponseBuilder();
 
 const bundler = {};
 
-export { CATEGORIES, OcrResultSchema, ParseResultSchema, ResponseBuilder, TEMPLATES, bundler, createExpenseTool, deleteExpenseTool, detectCategory, extractRawTextTool, extractReceiptTool, formatAmount, generateMissingFieldsPrompt, getBalancesTool, getCategoryByNameTool, getExpenseByIdTool, getExpensesTool, getMyBalanceTool, getSpendingSummaryTool, getUserPreferencesTool, initSourceTool, listCategoriesTool, ocrReceiptTool, parseExpenseText, parseTextTool, processReceiptTool, processTextExpenseTool, reconcileExpenseTool, recordSettlementTool, responses, setNicknameTool, setUserLanguageTool, syncMembersTool, validateParsedExpense };
+export { CATEGORIES, OcrResultSchema, ParseResultSchema, ResponseBuilder, TEMPLATES, bundler, checkDuplicatePurchaseTool, createExpenseTool, deleteExpenseTool, detectCategory, detectItemTypeTool, extractRawTextTool, extractReceiptTool, formatAmount, generateMissingFieldsPrompt, getBalancesTool, getCategoryByNameTool, getExpenseByIdTool, getExpensesTool, getMyBalanceTool, getPerishableWindowTool, getSpendingSummaryTool, getUserPreferencesTool, initSourceTool, listCategoriesTool, ocrReceiptTool, parseExpenseText, parseTextTool, processReceiptTool, processTextExpenseTool, reconcileExpenseTool, recordSettlementTool, responses, searchSimilarPurchasesTool, setNicknameTool, setUserLanguageTool, syncMembersTool, validateParsedExpense };

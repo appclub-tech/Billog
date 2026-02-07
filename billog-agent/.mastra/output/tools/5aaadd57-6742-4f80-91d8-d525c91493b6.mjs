@@ -18,17 +18,7 @@ async function apiRequest(method, path, context, body) {
   const url = `${BILLOG_API_URL}/api${path}`;
   const token = generateJwt(context);
   const requestId = Math.random().toString(36).substring(2, 10);
-  console.log(`
-${"\u2500".repeat(50)}`);
-  console.log(`[API] \u{1F4E4} REQUEST [${requestId}]`);
-  console.log(`${"\u2500".repeat(50)}`);
-  console.log(`  Method:     ${method}`);
-  console.log(`  URL:        ${url}`);
-  console.log(`  Context:    ${JSON.stringify(context)}`);
-  if (body) {
-    console.log(`  Body:       ${JSON.stringify(body, null, 2).substring(0, 500)}`);
-  }
-  console.log(`${"\u2500".repeat(50)}`);
+  console.log(`[API] ${method} ${path}`);
   const startTime = Date.now();
   try {
     const response = await fetch(url, {
@@ -42,15 +32,7 @@ ${"\u2500".repeat(50)}`);
     });
     const duration = Date.now() - startTime;
     const responseText = await response.text();
-    console.log(`
-${"\u2500".repeat(50)}`);
-    console.log(`[API] \u{1F4E5} RESPONSE [${requestId}] ${response.status} ${duration}ms`);
-    console.log(`${"\u2500".repeat(50)}`);
-    console.log(`  Status:     ${response.status} ${response.statusText}`);
-    console.log(`  Duration:   ${duration}ms`);
-    console.log(`  Body:       ${responseText.substring(0, 500)}${responseText.length > 500 ? "..." : ""}`);
-    console.log(`${"\u2500".repeat(50)}
-`);
+    console.log(`[API] ${response.status} ${duration}ms`);
     if (!response.ok) {
       throw new Error(`API Error ${response.status}: ${responseText}`);
     }
@@ -61,13 +43,8 @@ ${"\u2500".repeat(50)}`);
     }
   } catch (error) {
     const duration = Date.now() - startTime;
-    console.log(`
-${"\u2500".repeat(50)}`);
-    console.log(`[API] \u274C ERROR [${requestId}] ${duration}ms`);
-    console.log(`${"\u2500".repeat(50)}`);
-    console.log(`  Error:      ${error instanceof Error ? error.message : String(error)}`);
-    console.log(`${"\u2500".repeat(50)}
-`);
+    const errMsg = error instanceof Error ? error.message : String(error);
+    console.error(`[API] \u274C ${method} ${path} failed ${duration}ms: ${errMsg}`);
     throw error;
   }
 }

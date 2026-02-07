@@ -1,21 +1,23 @@
 import { Mastra } from '@mastra/core';
 import { LibSQLVector, LibSQLStore } from '@mastra/libsql';
+import path from 'path';
 import { Agent } from '@mastra/core/agent';
 import { Memory } from '@mastra/memory';
 import { Workspace, LocalFilesystem } from '@mastra/core/workspace';
 import { UnicodeNormalizer, TokenLimiterProcessor } from '@mastra/core/processors';
 import { ModelRouterEmbeddingModel } from '@mastra/core/llm';
-import path from 'path';
 import { fileURLToPath } from 'url';
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
 import jwt from 'jsonwebtoken';
+import { Index } from '@upstash/vector';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { RequestContext } from '@mastra/core/request-context';
 import crypto from 'crypto';
 import fs from 'fs/promises';
-import { createStep, createWorkflow } from '@mastra/core/workflows';
 import { EventEmitter } from 'events';
+import { createStep, createWorkflow } from '@mastra/core/workflows';
 
 "use strict";
 const BILLOG_API_URL = process.env.BILLOG_API_URL || "http://localhost:8000";
@@ -137,6 +139,299 @@ function getApiContext(input, requestContext) {
 }
 
 "use strict";
+const PERISHABLE_WINDOWS = {
+  fresh_produce: 7,
+  // banana, vegetables, leafy greens
+  dairy: 14,
+  // milk, yogurt, cheese
+  bread: 5,
+  // bread, pastries
+  meat_seafood: 3,
+  // chicken, fish, shrimp
+  eggs: 21,
+  // eggs
+  frozen: 60,
+  // frozen items
+  pantry: 180,
+  // rice, pasta, canned goods
+  non_food: 0
+  // household items (no check)
+};
+const ITEM_TYPE_PATTERNS = {
+  fresh_produce: [
+    // Fruits
+    /banana|กล้วย/i,
+    /apple|แอปเปิ้ล/i,
+    /orange|ส้ม/i,
+    /mango|มะม่วง/i,
+    /watermelon|แตงโม/i,
+    /strawberry|สตรอว์เบอร์รี่/i,
+    /grape|องุ่น/i,
+    /pineapple|สับปะรด/i,
+    /papaya|มะละกอ/i,
+    /longan|ลำไย/i,
+    /durian|ทุเรียน/i,
+    /lychee|ลิ้นจี่/i,
+    /rambutan|เงาะ/i,
+    /mangosteen|มังคุด/i,
+    // Vegetables
+    /lettuce|ผักกาด/i,
+    /spinach|ผักโขม/i,
+    /cabbage|กะหล่ำปลี/i,
+    /carrot|แครอท/i,
+    /tomato|มะเขือเทศ/i,
+    /cucumber|แตงกวา/i,
+    /broccoli|บร็อคโคลี่/i,
+    /chinese|ผักจีน|ผักคะน้า|ผักกาดขาว/i,
+    /morning glory|ผักบุ้ง/i,
+    /basil|โหระพา|กะเพรา/i,
+    /vegetable|ผัก/i,
+    /salad|สลัด/i,
+    /herb|สมุนไพร/i,
+    /fresh|สด/i
+  ],
+  dairy: [
+    /milk|นม/i,
+    /yogurt|โยเกิร์ต/i,
+    /cheese|ชีส/i,
+    /cream|ครีม/i,
+    /butter|เนย/i,
+    /dairy|นม/i,
+    /kefir/i
+  ],
+  bread: [
+    /bread|ขนมปัง/i,
+    /bakery|เบเกอรี่/i,
+    /pastry|เพสตรี้/i,
+    /croissant|ครัวซองต์/i,
+    /donut|โดนัท/i,
+    /cake|เค้ก/i,
+    /bun|ซาลาเปา|ปัง/i,
+    /toast|โทสต์/i
+  ],
+  meat_seafood: [
+    /chicken|ไก่/i,
+    /pork|หมู/i,
+    /beef|เนื้อ/i,
+    /fish|ปลา/i,
+    /shrimp|กุ้ง/i,
+    /crab|ปู/i,
+    /squid|หมึก/i,
+    /meat|เนื้อสัตว์/i,
+    /seafood|อาหารทะเล/i,
+    /shellfish|หอย/i,
+    /salmon|แซลมอน/i,
+    /tuna|ทูน่า/i
+  ],
+  eggs: [
+    /egg|ไข่/i
+  ],
+  frozen: [
+    /frozen|แช่แข็ง/i,
+    /ice cream|ไอศกรีม/i
+  ],
+  pantry: [
+    /rice|ข้าว/i,
+    /pasta|พาสต้า/i,
+    /noodle|เส้น|บะหมี่/i,
+    /can|กระป๋อง/i,
+    /sauce|ซอส/i,
+    /oil|น้ำมัน/i,
+    /sugar|น้ำตาล/i,
+    /salt|เกลือ/i,
+    /flour|แป้ง/i,
+    /instant|สำเร็จรูป/i,
+    /snack|ขนม/i,
+    /chips|มันฝรั่ง/i,
+    /coffee|กาแฟ/i,
+    /tea|ชา/i,
+    /cereal|ซีเรียล/i
+  ],
+  non_food: [
+    /soap|สบู่/i,
+    /shampoo|แชมพู/i,
+    /detergent|ผงซักฟอก/i,
+    /tissue|ทิชชู่|กระดาษ/i,
+    /toothpaste|ยาสีฟัน/i,
+    /cleaning|ทำความสะอาด/i,
+    /household|ของใช้/i
+  ]
+};
+function detectItemType(itemName) {
+  const normalizedName = itemName.toLowerCase().trim();
+  for (const [type, patterns] of Object.entries(ITEM_TYPE_PATTERNS)) {
+    for (const pattern of patterns) {
+      if (pattern.test(normalizedName)) {
+        return type;
+      }
+    }
+  }
+  return "pantry";
+}
+function getPerishableWindow(itemType) {
+  return PERISHABLE_WINDOWS[itemType];
+}
+function getPerishableWindowForItem(itemName) {
+  const itemType = detectItemType(itemName);
+  return getPerishableWindow(itemType);
+}
+function shouldCheckFreshness(itemType) {
+  return itemType !== "non_food";
+}
+
+"use strict";
+let vectorIndex = null;
+function getExpenseItemVectorIndex() {
+  if (vectorIndex) {
+    return vectorIndex;
+  }
+  const url = process.env.UPSTASH_VECTOR_REST_URL;
+  const token = process.env.UPSTASH_VECTOR_REST_TOKEN;
+  if (!url || !token) {
+    throw new Error(
+      "Missing Upstash Vector configuration. Set UPSTASH_VECTOR_REST_URL and UPSTASH_VECTOR_REST_TOKEN."
+    );
+  }
+  vectorIndex = new Index({
+    url,
+    token
+  });
+  console.log("[Vector] Upstash Vector index initialized");
+  return vectorIndex;
+}
+function isVectorStoreConfigured() {
+  return !!(process.env.UPSTASH_VECTOR_REST_URL && process.env.UPSTASH_VECTOR_REST_TOKEN);
+}
+async function saveExpenseItemEmbeddings(expenseId, items, sourceId, date, paidBy) {
+  if (!isVectorStoreConfigured()) {
+    console.log("[Vector] Skipping save - vector store not configured");
+    return;
+  }
+  const index = getExpenseItemVectorIndex();
+  const embeddings = items.map((item, idx) => {
+    const searchText = item.nameLocalized ? `${item.name} ${item.nameLocalized}` : item.name;
+    const metadata = {
+      name: item.name,
+      nameLocalized: item.nameLocalized,
+      sourceId,
+      date,
+      expenseId,
+      quantity: item.quantity,
+      unit: item.unit,
+      unitPrice: item.unitPrice,
+      totalPrice: item.totalPrice ?? item.quantity * item.unitPrice,
+      itemType: detectItemType(item.name),
+      paidBy
+    };
+    return {
+      id: `${expenseId}-item-${idx}`,
+      data: searchText,
+      metadata
+    };
+  });
+  try {
+    await index.upsert(embeddings);
+    console.log(`[Vector] Saved ${embeddings.length} item embeddings for expense ${expenseId}`);
+  } catch (error) {
+    console.error(`[Vector] Failed to save embeddings:`, error);
+  }
+}
+async function saveSimpleExpenseEmbedding(expenseId, description, amount, sourceId, date, paidBy) {
+  await saveExpenseItemEmbeddings(
+    expenseId,
+    [{
+      name: description,
+      quantity: 1,
+      unitPrice: amount,
+      totalPrice: amount
+    }],
+    sourceId,
+    date,
+    paidBy
+  );
+}
+function daysBetween(dateStr, now) {
+  const date = new Date(dateStr);
+  const diffTime = now.getTime() - date.getTime();
+  return Math.floor(diffTime / (1e3 * 60 * 60 * 24));
+}
+async function searchSimilarItems(query, sourceId, lookbackDays = 14, topK = 10) {
+  if (!isVectorStoreConfigured()) {
+    console.log("[Vector] Skipping search - vector store not configured");
+    return { found: false, matches: [] };
+  }
+  const index = getExpenseItemVectorIndex();
+  const now = /* @__PURE__ */ new Date();
+  const cutoffDate = /* @__PURE__ */ new Date();
+  cutoffDate.setDate(cutoffDate.getDate() - lookbackDays);
+  try {
+    const results = await index.query({
+      data: query,
+      topK,
+      filter: `sourceId = '${sourceId}'`,
+      includeMetadata: true
+    });
+    const matches = results.filter((r) => {
+      const metadata = r.metadata;
+      const itemDate = new Date(metadata.date);
+      return itemDate >= cutoffDate;
+    }).filter((r) => r.score >= 0.7).map((r) => {
+      const metadata = r.metadata;
+      return {
+        id: r.id,
+        name: metadata.name,
+        nameLocalized: metadata.nameLocalized,
+        date: metadata.date,
+        quantity: metadata.quantity,
+        unit: metadata.unit,
+        totalPrice: metadata.totalPrice,
+        expenseId: metadata.expenseId,
+        itemType: metadata.itemType,
+        similarity: r.score,
+        daysSince: daysBetween(metadata.date, now),
+        paidBy: metadata.paidBy
+      };
+    });
+    if (matches.length === 0) {
+      return { found: false, matches: [] };
+    }
+    matches.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    return {
+      found: true,
+      matches,
+      lastPurchase: matches[0]
+    };
+  } catch (error) {
+    console.error(`[Vector] Search failed:`, error);
+    return { found: false, matches: [] };
+  }
+}
+async function deleteExpenseEmbeddings(expenseId) {
+  if (!isVectorStoreConfigured()) {
+    return;
+  }
+  const index = getExpenseItemVectorIndex();
+  try {
+    const results = await index.query({
+      data: "expense item",
+      // Generic query to find items
+      topK: 100,
+      filter: `expenseId = '${expenseId}'`,
+      includeMetadata: true
+    });
+    if (results.length > 0) {
+      const ids = results.map((r) => r.id);
+      await index.delete(ids);
+      console.log(`[Vector] Deleted ${ids.length} embeddings for expense ${expenseId}`);
+    }
+  } catch (error) {
+    console.error(`[Vector] Failed to delete embeddings:`, error);
+  }
+}
+
+"use strict";
+
+"use strict";
 const ExpenseItemSchema = z.object({
   name: z.string().describe("Item name in English (default language)"),
   nameLocalized: z.string().optional().describe("Original language name (Thai, Japanese, etc.)"),
@@ -254,6 +549,11 @@ ${"=".repeat(60)}`);
         Object.assign(expenseMetadata, input.metadata);
       }
       const expenseDate = input.date || input.metadata?.transactionDate || void 0;
+      const expenseItems = input.items && input.items.length > 0 ? input.items : [{
+        name: input.description,
+        quantity: 1,
+        unitPrice: input.amount
+      }];
       const response = await apiRequest("POST", "/expenses", context, {
         channel,
         senderChannelId,
@@ -267,7 +567,7 @@ ${"=".repeat(60)}`);
         // TODO: implement category name-to-ID resolution
         splitType: input.splitType,
         splits: input.splits,
-        items: input.items,
+        items: expenseItems,
         notes: input.notes,
         metadata: Object.keys(expenseMetadata).length > 0 ? expenseMetadata : void 0,
         // Receipt data from OCR - creates Receipt record after expense
@@ -281,6 +581,25 @@ ${"=".repeat(60)}`);
         };
       }
       console.log(`[TOOL] \u2705 create-expense SUCCESS: EX:${response.expense.id}`);
+      if (isVectorStoreConfigured()) {
+        const vectorDate = response.expense.date || (/* @__PURE__ */ new Date()).toISOString();
+        const paidBy = senderChannelId;
+        saveExpenseItemEmbeddings(
+          response.expense.id,
+          expenseItems.map((item) => ({
+            name: item.name,
+            nameLocalized: item.nameLocalized,
+            quantity: item.quantity || 1,
+            unit: void 0,
+            // Not in current schema
+            unitPrice: item.unitPrice,
+            totalPrice: (item.quantity || 1) * item.unitPrice
+          })),
+          sourceChannelId,
+          vectorDate,
+          paidBy
+        ).catch((err) => console.error("[Vector] Embedding save error:", err));
+      }
       const formattedAmount = formatAmount(response.expense.amount, response.expense.currency);
       let message = `${response.expense.description} | ${formattedAmount}`;
       message += `
@@ -1386,10 +1705,10 @@ const ReceiptMetadataSchema = z.object({
   points: z.string().nullable()
 });
 const categoryList$4 = Object.keys(CATEGORIES).join("|");
-const EXTRACT_TEXT_PROMPT$4 = `Extract ALL text from this image exactly as shown.
+const EXTRACT_TEXT_PROMPT$1 = `Extract ALL text from this image exactly as shown.
 Include every word, number, and symbol visible.
 Return ONLY the raw text, no formatting or explanation.`;
-const ANALYZE_TEXT_PROMPT$4 = `Analyze this receipt text and extract structured data as JSON.
+const ANALYZE_TEXT_PROMPT$1 = `Analyze this receipt text and extract structured data as JSON.
 
 Receipt text:
 ---
@@ -1539,12 +1858,12 @@ Only after create-expense returns an expenseId can you confirm the expense was r
       const image = await downloadImage$4(input.imageUrl);
       console.log("[OCR] Step 1: Extracting text...");
       const rawText = await callGemini$4("gemini-2.0-flash", [
-        EXTRACT_TEXT_PROMPT$4,
+        EXTRACT_TEXT_PROMPT$1,
         { inlineData: { data: image.data, mimeType: image.mimeType } }
       ]);
       console.log(`[OCR] Extracted ${rawText.length} chars`);
       console.log("[OCR] Step 2: Analyzing text...");
-      const analyzePrompt = ANALYZE_TEXT_PROMPT$4.replace("{TEXT}", rawText);
+      const analyzePrompt = ANALYZE_TEXT_PROMPT$1.replace("{TEXT}", rawText);
       const analysisText = await callGemini$4("gemini-2.0-flash", [analyzePrompt]);
       const result = parseJSON$4(analysisText);
       console.log(`[OCR] isReceipt: ${result.isReceipt}, items: ${result.items?.length || 0}`);
@@ -1609,18 +1928,9 @@ const extractRawTextTool = extractReceiptTool;
 
 "use strict";
 const genAI$3 = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY || "");
-const EXTRACT_TEXT_PROMPT$3 = `Extract ALL text from this image exactly as shown.
-Include every word, number, and symbol visible.
-Return ONLY the raw text, no formatting or explanation.`;
 const categoryList$3 = Object.keys(CATEGORIES).join("|");
-const ANALYZE_TEXT_PROMPT$3 = `Analyze this receipt text and extract structured data as JSON.
+const OCR_PROMPT$2 = `Extract and analyze this receipt image. Return JSON only.
 
-Receipt text:
----
-{TEXT}
----
-
-Return JSON:
 {
   "isReceipt": true/false,
   "storeName": "store name in English",
@@ -1775,15 +2085,11 @@ ${"=".repeat(60)}`);
     try {
       console.log("[Receipt] Step 1: OCR extraction...");
       const image = await downloadImage$3(input.imageUrl);
-      console.log("[Receipt] Extracting text...");
-      const rawText = await callGemini$3("gemini-2.0-flash", [
-        EXTRACT_TEXT_PROMPT$3,
+      console.log("[Receipt] Processing receipt...");
+      const analysisText = await callGemini$3("gemini-2.0-flash", [
+        OCR_PROMPT$2,
         { inlineData: { data: image.data, mimeType: image.mimeType } }
       ]);
-      console.log(`[Receipt] Extracted ${rawText.length} chars`);
-      console.log("[Receipt] Analyzing text...");
-      const analyzePrompt = ANALYZE_TEXT_PROMPT$3.replace("{TEXT}", rawText);
-      const analysisText = await callGemini$3("gemini-2.0-flash", [analyzePrompt]);
       const ocrResult = parseJSON$3(analysisText);
       console.log(`[Receipt] isReceipt: ${ocrResult.isReceipt}, items: ${ocrResult.items?.length || 0}`);
       if (!ocrResult.isReceipt) {
@@ -1809,6 +2115,19 @@ ${"=".repeat(60)}`);
         Object.assign(expenseMetadata, metadata);
       }
       const expenseDate = metadata?.transactionDate || void 0;
+      const expenseItems = items.length > 0 ? items.map((item) => ({
+        name: item.name || "Unknown",
+        nameLocalized: item.nameLocalized || null,
+        quantity: item.quantity || 1,
+        unitPrice: item.unitPrice || 0,
+        ingredientType: item.ingredientType || null
+      })) : [{
+        name: storeName,
+        nameLocalized: null,
+        quantity: 1,
+        unitPrice: total,
+        ingredientType: null
+      }];
       const response = await apiRequest("POST", "/expenses", context, {
         channel,
         senderChannelId,
@@ -1820,13 +2139,7 @@ ${"=".repeat(60)}`);
         date: expenseDate,
         splitType: input.splitType,
         splits: input.splits,
-        items: items.map((item) => ({
-          name: item.name || "Unknown",
-          nameLocalized: item.nameLocalized || null,
-          quantity: item.quantity || 1,
-          unitPrice: item.unitPrice || 0,
-          ingredientType: item.ingredientType || null
-        })),
+        items: expenseItems,
         notes: input.notes,
         metadata: Object.keys(expenseMetadata).length > 0 ? expenseMetadata : void 0,
         // Receipt data for creating Receipt record
@@ -1853,6 +2166,23 @@ ${"=".repeat(60)}`);
         };
       }
       console.log(`[Receipt] \u2705 SUCCESS: EX:${response.expense.id}`);
+      if (isVectorStoreConfigured()) {
+        const embeddingDate = response.expense.date || (/* @__PURE__ */ new Date()).toISOString();
+        saveExpenseItemEmbeddings(
+          response.expense.id,
+          expenseItems.map((item) => ({
+            name: item.name || "Unknown",
+            nameLocalized: item.nameLocalized || void 0,
+            quantity: item.quantity || 1,
+            unitPrice: item.unitPrice || 0,
+            totalPrice: (item.quantity || 1) * (item.unitPrice || 0)
+          })),
+          sourceChannelId,
+          embeddingDate,
+          senderChannelId
+          // Who paid
+        ).catch((err) => console.error("[Vector] Embedding save error:", err));
+      }
       const formattedAmount = formatAmount(response.expense.amount, response.expense.currency);
       let message = `${storeName} | ${formattedAmount}`;
       message += `
@@ -2066,6 +2396,11 @@ ${"=".repeat(60)}`);
       sourceChannelId,
       sourceType: isGroup ? "GROUP" : "DM"
     };
+    const expenseItem = {
+      name: parsed.description,
+      quantity: 1,
+      unitPrice: parsed.amount
+    };
     try {
       const response = await apiRequest("POST", "/expenses", context, {
         channel,
@@ -2077,7 +2412,9 @@ ${"=".repeat(60)}`);
         currency: parsed.currency,
         date: parsed.date,
         splitType: parsed.splitType,
-        splits: parsed.splitTargets.map((target) => ({ target }))
+        splits: parsed.splitTargets.map((target) => ({ target })),
+        // Always include items - even single item purchases
+        items: [expenseItem]
       });
       if (!response.expense?.id) {
         console.error(`[TextExpense] \u274C FAILED: No expenseId in response`);
@@ -2087,6 +2424,17 @@ ${"=".repeat(60)}`);
         };
       }
       console.log(`[TextExpense] \u2705 SUCCESS: EX:${response.expense.id}`);
+      if (isVectorStoreConfigured()) {
+        const expenseDate = response.expense.date || (/* @__PURE__ */ new Date()).toISOString();
+        saveExpenseItemEmbeddings(
+          response.expense.id,
+          [expenseItem],
+          sourceChannelId,
+          expenseDate,
+          senderChannelId
+          // Who paid
+        ).catch((err) => console.error("[Vector] Embedding save error:", err));
+      }
       const formattedAmount = formatAmount(response.expense.amount, response.expense.currency);
       let message = `${response.expense.description} | ${formattedAmount}`;
       message += `
@@ -2130,11 +2478,11 @@ EX:${response.expense.id}`;
 
 "use strict";
 const genAI$2 = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY || "");
-const EXTRACT_TEXT_PROMPT$2 = `Extract ALL text from this image exactly as shown.
+const EXTRACT_TEXT_PROMPT = `Extract ALL text from this image exactly as shown.
 Include every word, number, and symbol visible.
 Return ONLY the raw text, no formatting or explanation.`;
 const categoryList$2 = Object.keys(CATEGORIES).join("|");
-const ANALYZE_TEXT_PROMPT$2 = `Analyze this receipt text and extract structured data as JSON.
+const ANALYZE_TEXT_PROMPT = `Analyze this receipt text and extract structured data as JSON.
 
 Receipt text:
 ---
@@ -2308,12 +2656,12 @@ ${"=".repeat(60)}`);
       }
       console.log("[OCR] Extracting text...");
       const rawText = await callGemini$2("gemini-2.0-flash", [
-        EXTRACT_TEXT_PROMPT$2,
+        EXTRACT_TEXT_PROMPT,
         { inlineData: { data: imageData.data, mimeType: imageData.mimeType } }
       ]);
       console.log(`[OCR] Extracted ${rawText.length} chars`);
       console.log("[OCR] Analyzing text...");
-      const analyzePrompt = ANALYZE_TEXT_PROMPT$2.replace("{TEXT}", rawText);
+      const analyzePrompt = ANALYZE_TEXT_PROMPT.replace("{TEXT}", rawText);
       const analysisText = await callGemini$2("gemini-2.0-flash", [analyzePrompt]);
       const ocrResult = parseJSON$2(analysisText);
       console.log(`[OCR] isReceipt: ${ocrResult.isReceipt}, items: ${ocrResult.items?.length || 0}`);
@@ -2611,6 +2959,247 @@ Use when user says "speak English", "speak Thai", "use Thai", etc.`,
 });
 
 "use strict";
+const searchSimilarPurchasesTool = createTool({
+  id: "search-similar-purchases",
+  description: `Semantic search for similar items in purchase history.
+Works across languages: "banana" matches "\u0E01\u0E25\u0E49\u0E27\u0E22", "milk" matches "\u0E19\u0E21".
+Use this to check if user recently bought an item.
+
+Returns matches sorted by date (most recent first).`,
+  inputSchema: z.object({
+    query: z.string().describe('Item to search for: "banana", "\u0E01\u0E25\u0E49\u0E27\u0E22", "milk"'),
+    lookbackDays: z.number().default(14).describe("Days to look back (default: 14)")
+  }),
+  outputSchema: z.object({
+    found: z.boolean(),
+    message: z.string(),
+    matches: z.array(z.object({
+      name: z.string(),
+      nameLocalized: z.string().optional(),
+      date: z.string(),
+      quantity: z.number(),
+      unit: z.string().optional(),
+      totalPrice: z.number(),
+      expenseId: z.string(),
+      itemType: z.string(),
+      daysSince: z.number(),
+      similarity: z.number(),
+      paidBy: z.string().optional()
+    })),
+    lastPurchase: z.object({
+      name: z.string(),
+      date: z.string(),
+      quantity: z.number(),
+      unit: z.string().optional(),
+      totalPrice: z.number(),
+      daysSince: z.number()
+    }).optional()
+  }),
+  execute: async (input, ctx) => {
+    const reqCtx = ctx?.requestContext;
+    const sourceChannelId = reqCtx?.get("sourceChannelId");
+    console.log(`
+${"=".repeat(60)}`);
+    console.log(`[TOOL] \u{1F50D} search-similar-purchases CALLED`);
+    console.log(`${"=".repeat(60)}`);
+    console.log(`  Query:        "${input.query}"`);
+    console.log(`  Lookback:     ${input.lookbackDays} days`);
+    console.log(`  SourceId:     ${sourceChannelId}`);
+    console.log(`${"=".repeat(60)}
+`);
+    if (!sourceChannelId) {
+      console.error(`[Insights] \u274C FAILED: Missing sourceChannelId`);
+      return {
+        found: false,
+        message: "Cannot search - missing context.",
+        matches: []
+      };
+    }
+    const result = await searchSimilarItems(
+      input.query,
+      sourceChannelId,
+      input.lookbackDays
+    );
+    if (!result.found) {
+      console.log(`[Insights] No matches found for "${input.query}"`);
+      return {
+        found: false,
+        message: `No recent purchases of "${input.query}" found.`,
+        matches: []
+      };
+    }
+    const { lastPurchase } = result;
+    console.log(`[Insights] Found ${result.matches.length} matches, last: ${lastPurchase?.name} (${lastPurchase?.daysSince} days ago)`);
+    return {
+      found: true,
+      message: lastPurchase ? `Found ${lastPurchase.name} purchased ${lastPurchase.daysSince} days ago (${lastPurchase.quantity} ${lastPurchase.unit || "units"})` : `Found ${result.matches.length} matches`,
+      matches: result.matches,
+      lastPurchase: lastPurchase ? {
+        name: lastPurchase.name,
+        date: lastPurchase.date,
+        quantity: lastPurchase.quantity,
+        unit: lastPurchase.unit,
+        totalPrice: lastPurchase.totalPrice,
+        daysSince: lastPurchase.daysSince
+      } : void 0
+    };
+  }
+});
+const getPerishableWindowTool = createTool({
+  id: "get-perishable-window",
+  description: `Get the typical freshness window for an item type.
+Use this to determine if a duplicate purchase warning is relevant.
+
+Item types:
+- fresh_produce: 7 days (banana, vegetables)
+- dairy: 14 days (milk, yogurt)
+- bread: 5 days (bread, pastries)
+- meat_seafood: 3 days (chicken, fish)
+- eggs: 21 days
+- frozen: 60 days
+- pantry: 180 days (rice, pasta)
+- non_food: 0 (no check)`,
+  inputSchema: z.object({
+    itemType: z.enum([
+      "fresh_produce",
+      "dairy",
+      "bread",
+      "meat_seafood",
+      "eggs",
+      "frozen",
+      "pantry",
+      "non_food"
+    ]).describe("The item type to get window for")
+  }),
+  outputSchema: z.object({
+    days: z.number(),
+    shouldCheck: z.boolean()
+  }),
+  execute: async (input) => {
+    const days = getPerishableWindow(input.itemType);
+    return {
+      days,
+      shouldCheck: input.itemType !== "non_food"
+    };
+  }
+});
+const detectItemTypeTool = createTool({
+  id: "detect-item-type",
+  description: `Detect the perishable type from an item name.
+Supports English and Thai. Returns the item type and freshness window.`,
+  inputSchema: z.object({
+    itemName: z.string().describe("Item name to detect type for")
+  }),
+  outputSchema: z.object({
+    itemType: z.string(),
+    freshnessWindow: z.number(),
+    shouldCheck: z.boolean()
+  }),
+  execute: async (input) => {
+    const itemType = detectItemType(input.itemName);
+    const freshnessWindow = getPerishableWindow(itemType);
+    return {
+      itemType,
+      freshnessWindow,
+      shouldCheck: itemType !== "non_food"
+    };
+  }
+});
+const checkDuplicatePurchaseTool = createTool({
+  id: "check-duplicate-purchase",
+  description: `Check if user recently bought a similar item within its freshness window.
+Combines search + perishable check. Returns advisory if duplicate found.
+
+Call this when user records a new expense to check for duplicates.`,
+  inputSchema: z.object({
+    items: z.array(z.object({
+      name: z.string(),
+      nameLocalized: z.string().optional()
+    })).describe("Items being purchased")
+  }),
+  outputSchema: z.object({
+    hasDuplicates: z.boolean(),
+    duplicates: z.array(z.object({
+      itemName: z.string(),
+      lastPurchase: z.object({
+        name: z.string(),
+        date: z.string(),
+        quantity: z.number(),
+        daysSince: z.number()
+      }),
+      freshnessWindow: z.number(),
+      isWithinWindow: z.boolean(),
+      message: z.string()
+    })),
+    advisoryMessage: z.string().nullable()
+  }),
+  execute: async (input, ctx) => {
+    const reqCtx = ctx?.requestContext;
+    const sourceChannelId = reqCtx?.get("sourceChannelId");
+    console.log(`
+${"=".repeat(60)}`);
+    console.log(`[TOOL] \u{1F504} check-duplicate-purchase CALLED`);
+    console.log(`${"=".repeat(60)}`);
+    console.log(`  Items:    ${input.items.map((i) => i.name).join(", ")}`);
+    console.log(`  SourceId: ${sourceChannelId}`);
+    console.log(`${"=".repeat(60)}
+`);
+    if (!sourceChannelId) {
+      return {
+        hasDuplicates: false,
+        duplicates: [],
+        advisoryMessage: null
+      };
+    }
+    const duplicates = [];
+    for (const item of input.items) {
+      const searchQuery = item.nameLocalized ? `${item.name} ${item.nameLocalized}` : item.name;
+      const itemType = detectItemType(item.name);
+      const freshnessWindow = getPerishableWindow(itemType);
+      if (itemType === "non_food") continue;
+      const result = await searchSimilarItems(
+        searchQuery,
+        sourceChannelId,
+        freshnessWindow
+        // Use freshness window as lookback
+      );
+      if (result.found && result.lastPurchase) {
+        const isWithinWindow = result.lastPurchase.daysSince <= freshnessWindow;
+        duplicates.push({
+          itemName: item.name,
+          lastPurchase: {
+            name: result.lastPurchase.name,
+            date: result.lastPurchase.date,
+            quantity: result.lastPurchase.quantity,
+            daysSince: result.lastPurchase.daysSince
+          },
+          freshnessWindow,
+          isWithinWindow,
+          message: isWithinWindow ? `You bought ${result.lastPurchase.name} ${result.lastPurchase.daysSince} days ago (${result.lastPurchase.quantity} ${result.lastPurchase.unit || "units"}). Still have some?` : `Last purchase was ${result.lastPurchase.daysSince} days ago (outside ${freshnessWindow}-day window)`
+        });
+      }
+    }
+    const relevantDuplicates = duplicates.filter((d) => d.isWithinWindow);
+    let advisoryMessage = null;
+    if (relevantDuplicates.length > 0) {
+      if (relevantDuplicates.length === 1) {
+        const d = relevantDuplicates[0];
+        advisoryMessage = `\u26A0\uFE0F Heads up! ${d.message}`;
+      } else {
+        advisoryMessage = `\u26A0\uFE0F Heads up! You recently bought:
+` + relevantDuplicates.map((d) => `\u2022 ${d.lastPurchase.name} (${d.lastPurchase.daysSince} days ago)`).join("\n");
+      }
+    }
+    console.log(`[Insights] Found ${relevantDuplicates.length} relevant duplicates`);
+    return {
+      hasDuplicates: relevantDuplicates.length > 0,
+      duplicates,
+      advisoryMessage
+    };
+  }
+});
+
+"use strict";
 const TEMPLATES = {
   // Expense creation
   expenseCreated: (data) => `${data.description} | ${data.amount}
@@ -2722,7 +3311,29 @@ const responses = new ResponseBuilder();
 "use strict";
 const __filename$1 = fileURLToPath(import.meta.url);
 const __dirname$1 = path.dirname(__filename$1);
+function getDataPath(filename) {
+  if (process.env.MEMORY_DATABASE_URL) {
+    return process.env.MEMORY_DATABASE_URL;
+  }
+  if (process.env.NODE_ENV === "production") {
+    return `file:/app/data/${filename}`;
+  }
+  return `file:${path.join(process.cwd(), "data", filename)}`;
+}
 const BILLOG_BASE_INSTRUCTIONS = `You are Billog, an AI Bookkeeper that helps users track expenses and split bills through chat.
+
+## Multi-Agent System
+
+You work alongside an Insights Agent that handles shopping intelligence:
+- **You handle**: Expense recording, balance queries, settlements, expense history, help
+- **Insights handles**: Item search queries like "have I bought banana?", duplicate purchase warnings
+
+**Stay silent** (let Insights handle) for:
+- "have I bought X?" / "\u0E0B\u0E37\u0E49\u0E2D X \u0E2B\u0E23\u0E37\u0E2D\u0E22\u0E31\u0E07?"
+- "what groceries did I buy?" / "\u0E0B\u0E37\u0E49\u0E2D\u0E2D\u0E30\u0E44\u0E23\u0E1A\u0E49\u0E32\u0E07?"
+- Shopping history and item lookup questions
+
+**You respond** to everything else: expenses, balances, settlements, help, etc.
 
 ## Skills
 
@@ -2794,11 +3405,7 @@ Examples:
 When user sends a receipt image:
 1. Call process-receipt tool with the imageUrl
 2. The tool does OCR + creates expense in ONE step
-3. Only respond AFTER getting expenseId from the tool
-4. Include EX:{expenseId} in your response
-
-\u26A0\uFE0F CRITICAL: Use process-receipt (not extract-receipt) for receipts.
-process-receipt handles everything - OCR, expense creation, payment method linking.
+3. Use the tool's message field in your response (it includes EX:{expenseId})
 
 ## Bill Splitting
 
@@ -2849,16 +3456,18 @@ function getBillogInstructions({ requestContext }) {
   const languageSuffix = LANGUAGE_INSTRUCTIONS[userLanguage] || LANGUAGE_INSTRUCTIONS.th;
   return BILLOG_BASE_INSTRUCTIONS + languageSuffix;
 }
+const memoryDbUrl = getDataPath("agent-memory.db");
+console.log(`[Memory] Database URL: ${memoryDbUrl}`);
 const billogMemory = new Memory({
   // Composite storage for memory domain
   storage: new LibSQLStore({
     id: "billog-memory",
-    url: process.env.MEMORY_DATABASE_URL || "file:./data/agent-memory.db"
+    url: memoryDbUrl
   }),
   // Vector store for semantic recall (same DB, different tables)
   vector: new LibSQLVector({
     id: "billog-vector",
-    url: process.env.MEMORY_DATABASE_URL || "file:./data/agent-memory.db"
+    url: memoryDbUrl
   }),
   // Embedder for semantic search (uses OPENAI_API_KEY)
   embedder: new ModelRouterEmbeddingModel("openai/text-embedding-3-small"),
@@ -2967,6 +3576,116 @@ const billogAgent = new Agent({
     setUserLanguage: setUserLanguageTool,
     // Legacy (kept for compatibility)
     createExpense: createExpenseTool
+  }
+});
+
+"use strict";
+const google = createGoogleGenerativeAI({
+  apiKey: process.env.GOOGLE_API_KEY
+});
+const INSIGHTS_INSTRUCTIONS = `You are Billog's Shopping Insights assistant.
+You help users with shopping intelligence and zero-waste goals.
+
+## Your Role
+
+1. **When user records an expense** (isExpenseMessage=true):
+   - Check if they recently bought similar items
+   - If found within freshness window: warn gently
+   - If not found or outside window: STAY SILENT (respond with "SILENT")
+
+2. **When user asks about purchases**:
+   - "have I bought banana?" \u2192 search and answer
+   - "what groceries did I buy this week?" \u2192 search and summarize
+   - "\u0E0B\u0E37\u0E49\u0E2D\u0E01\u0E25\u0E49\u0E27\u0E22\u0E2B\u0E23\u0E37\u0E2D\u0E22\u0E31\u0E07?" \u2192 search and answer in Thai
+
+3. **When NOT to respond**:
+   - Balance queries, settlements, expense lists \u2192 STAY SILENT
+   - Help requests about using Billog \u2192 STAY SILENT
+   - General chat unrelated to shopping \u2192 STAY SILENT
+
+## Perishable Windows
+
+| Category | Days | Examples |
+|----------|------|----------|
+| Fresh produce | 7 | banana, vegetables, leafy greens |
+| Dairy | 14 | milk, yogurt, cheese |
+| Bread | 5 | bread, pastries |
+| Meat/seafood | 3 | chicken, fish, shrimp |
+| Eggs | 21 | eggs |
+| Frozen | 60 | frozen items |
+| Pantry | 180 | rice, pasta, canned goods |
+| Non-food | 0 | no check |
+
+## Response Style
+
+- **Brief and helpful** - not preachy
+- **Use emoji sparingly** - just \u26A0\uFE0F for warnings
+- **Only speak when you have useful info**
+- **Keep item names as-is** - don't translate "banana" to "\u0E01\u0E25\u0E49\u0E27\u0E22" or vice versa
+
+## Examples
+
+**Expense with duplicate found:**
+User message indicates expense: "banana 50"
+\u2192 Check for recent banana purchases
+\u2192 If found 3 days ago: "\u26A0\uFE0F You bought banana 3 days ago (2 bunches). Still have some?"
+
+**Expense without duplicate:**
+User message indicates expense: "coffee 65"
+\u2192 Check for recent coffee purchases
+\u2192 Not found or outside window: "SILENT"
+
+**Direct item query:**
+"have I bought banana this week?"
+\u2192 Search and respond: "Yes, you bought banana 3 days ago (2 bunches, \u0E3F50)"
+
+**Non-item query:**
+"who owes what"
+\u2192 "SILENT" (Bookkeeper handles this)
+
+## Critical Rules
+
+1. **ALWAYS respond with "SILENT" when you have nothing useful to say**
+2. Only warn about duplicates if:
+   - Item was purchased within its freshness window
+   - It's a perishable item (not pantry/non-food)
+3. For expense messages, use check-duplicate-purchase tool
+4. For queries, use search-similar-purchases tool
+
+## Context
+
+Each message includes context:
+- Channel: LINE, WHATSAPP, or TELEGRAM
+- SenderChannelId: Who is talking
+- SourceChannelId: Which group/DM
+- IsGroup: true for groups, false for DM
+- isExpenseMessage: true if this is an expense being recorded
+- expenseItems: items from the expense (if available)
+`;
+function getInsightsInstructions({
+  requestContext
+}) {
+  const userLanguage = requestContext?.get("userLanguage") || "th";
+  const languageSuffix = userLanguage === "th" ? `
+
+## \u0E20\u0E32\u0E29\u0E32: \u0E44\u0E17\u0E22
+\u0E15\u0E2D\u0E1A\u0E40\u0E1B\u0E47\u0E19\u0E20\u0E32\u0E29\u0E32\u0E44\u0E17\u0E22` : `
+
+## LANGUAGE: ENGLISH
+Respond in English.`;
+  return INSIGHTS_INSTRUCTIONS + languageSuffix;
+}
+const insightsAgent = new Agent({
+  id: "insights",
+  name: "Insights",
+  description: "Shopping intelligence agent for duplicate warnings and item queries",
+  instructions: getInsightsInstructions,
+  model: google("gemini-2.0-flash"),
+  tools: {
+    searchSimilarPurchases: searchSimilarPurchasesTool,
+    getPerishableWindow: getPerishableWindowTool,
+    detectItemType: detectItemTypeTool,
+    checkDuplicatePurchase: checkDuplicatePurchaseTool
   }
 });
 
@@ -3308,6 +4027,824 @@ class LineAdapter {
 }
 
 "use strict";
+class GatewayRouter {
+  adapters = /* @__PURE__ */ new Map();
+  config;
+  mastra = null;
+  agent = null;
+  insightsAgent = null;
+  workflow = null;
+  // Simple in-memory lock per session (prevent concurrent runs)
+  sessionLocks = /* @__PURE__ */ new Map();
+  // User preferences cache (key: channel:userId)
+  userPrefsCache = /* @__PURE__ */ new Map();
+  PREFS_CACHE_TTL_MS = 60 * 60 * 1e3;
+  // 1 hour
+  // Suspended workflow runs (key: sessionKey)
+  suspendedRuns = /* @__PURE__ */ new Map();
+  SUSPENDED_RUN_TTL_MS = 5 * 60 * 1e3;
+  // 5 minutes timeout
+  constructor(config) {
+    this.config = config;
+  }
+  /**
+   * Initialize the gateway with adapters
+   */
+  async initialize(mastra) {
+    this.mastra = mastra;
+    this.agent = mastra.getAgent("billog");
+    if (!this.agent) {
+      throw new Error("Billog agent not found in Mastra instance");
+    }
+    this.insightsAgent = mastra.getAgent("insights");
+    if (this.insightsAgent) {
+      console.log("\u2713 Insights agent registered (parallel mode enabled)");
+    } else {
+      console.log("\u26A0 Insights agent not found - running in single-agent mode");
+    }
+    this.workflow = mastra.getWorkflow("messageWorkflow");
+    if (!this.workflow) {
+      console.warn("Message workflow not found - will use agent only");
+    } else {
+      console.log("\u2713 Message workflow registered");
+    }
+    if (this.config.line) {
+      const lineAdapter = new LineAdapter({
+        channelAccessToken: this.config.line.channelAccessToken,
+        channelSecret: this.config.line.channelSecret,
+        uploadsDir: this.config.line.uploadsDir,
+        baseUrl: this.config.line.baseUrl
+      });
+      await lineAdapter.initialize();
+      this.adapters.set("LINE", lineAdapter);
+    }
+    console.log(`\u2713 Gateway router initialized with ${this.adapters.size} adapter(s)`);
+    setInterval(() => this.cleanupExpiredRuns(), 6e4);
+  }
+  /**
+   * Get adapter by channel
+   */
+  getAdapter(channel) {
+    return this.adapters.get(channel);
+  }
+  /**
+   * Handle LINE webhook
+   */
+  async handleLineWebhook(body, signature) {
+    const adapter = this.adapters.get("LINE");
+    if (!adapter) {
+      throw new Error("LINE adapter not initialized");
+    }
+    const bodyStr = typeof body === "string" ? body : JSON.stringify(body);
+    if (!adapter.verifySignature(bodyStr, signature)) {
+      throw new Error("Invalid LINE signature");
+    }
+    const messages = await adapter.parseWebhook(body);
+    for (const msg of messages) {
+      await this.handleMessage(msg);
+    }
+  }
+  /**
+   * Handle incoming message from any channel
+   */
+  async handleMessage(message) {
+    console.log(`
+${"=".repeat(60)}`);
+    console.log(`[GATEWAY] \u{1F4E5} INBOUND MESSAGE`);
+    console.log(`${"=".repeat(60)}`);
+    console.log(`  Channel:    ${message.channel}`);
+    console.log(`  Source ID:  ${message.source.id}`);
+    console.log(`  Source:     ${message.source.type} - ${message.source.name || "N/A"}`);
+    console.log(`  Sender ID:  ${message.sender.id}`);
+    console.log(`  Sender:     ${message.sender.name || "N/A"}`);
+    console.log(`  Text:       ${message.text?.substring(0, 100) || "(no text)"}`);
+    if (message.imageUrl) {
+      console.log(`  Image URL:  ${message.imageUrl}`);
+    }
+    console.log(`${"=".repeat(60)}
+`);
+    const activationMode = this.config.groupActivation?.mode || "mention";
+    const mentionPatterns = this.config.groupActivation?.mentionPatterns || ["@billog", "billog"];
+    if (!shouldActivate(message, activationMode, mentionPatterns)) {
+      console.log(`[${message.channel}] Skipping (not activated): ${message.text?.substring(0, 50)}`);
+      return;
+    }
+    const sessionKey = makeSessionKey(message.channel, message.source.id);
+    await this.acquireLock(sessionKey);
+    let context = null;
+    try {
+      console.log(`[${sessionKey}] Processing: ${message.text?.substring(0, 50) || "(no text)"}`);
+      context = await this.buildAgentContext(message);
+      console.log(`[${sessionKey}] Context: language=${context.userLanguage}, isGroup=${context.isGroup}`);
+      const suspendedRun = this.suspendedRuns.get(sessionKey);
+      if (suspendedRun) {
+        console.log(`[${sessionKey}] Resuming suspended workflow: ${suspendedRun.runId}`);
+        await this.handleResume(message, sessionKey, suspendedRun, context);
+        return;
+      }
+      if (this.workflow) {
+        console.log(`[${sessionKey}] \u{1F504} Using WORKFLOW`);
+        await this.handleWithWorkflow(message, sessionKey, context);
+      } else {
+        console.log(`[${sessionKey}] \u{1F916} Using AGENT (no workflow)`);
+        await this.handleWithAgent(message, sessionKey, context);
+      }
+    } catch (error) {
+      console.error(`[${sessionKey}] \u274C Error:`, error);
+      await this.sendResponse(message, {
+        text: context?.userLanguage === "en" ? "Sorry, an error occurred. Please try again." : "\u0E02\u0E2D\u0E2D\u0E20\u0E31\u0E22 \u0E40\u0E01\u0E34\u0E14\u0E02\u0E49\u0E2D\u0E1C\u0E34\u0E14\u0E1E\u0E25\u0E32\u0E14 \u0E01\u0E23\u0E38\u0E13\u0E32\u0E25\u0E2D\u0E07\u0E43\u0E2B\u0E21\u0E48\u0E2D\u0E35\u0E01\u0E04\u0E23\u0E31\u0E49\u0E07"
+      });
+    } finally {
+      this.releaseLock(sessionKey);
+    }
+  }
+  /**
+   * Handle message with workflow
+   */
+  async handleWithWorkflow(message, sessionKey, context) {
+    if (!this.workflow) {
+      throw new Error("Workflow not initialized");
+    }
+    if (message.imageUrl || message.imageBase64) {
+      const ackMessage = context.userLanguage === "en" ? "\u{1F4F8} Got it! Processing..." : "\u{1F4F8} \u0E44\u0E14\u0E49\u0E23\u0E31\u0E1A\u0E41\u0E25\u0E49\u0E27! \u0E01\u0E33\u0E25\u0E31\u0E07\u0E1B\u0E23\u0E30\u0E21\u0E27\u0E25\u0E1C\u0E25...";
+      await this.sendResponse(message, { text: ackMessage });
+      message.replyToken = void 0;
+    }
+    const prefs = await this.getUserPreferences(message.channel, message.sender.id);
+    const workflowInput = {
+      channel: message.channel,
+      senderChannelId: message.sender.id,
+      sourceChannelId: message.source.id,
+      isGroup: message.source.type === "group",
+      senderName: message.sender.name,
+      sourceName: message.source.name,
+      userLanguage: prefs?.language || "th",
+      userCurrency: prefs?.currency || "THB",
+      userTimezone: prefs?.timezone || "Asia/Bangkok",
+      messageText: message.text,
+      imageUrl: message.imageUrl,
+      imageBase64: message.imageBase64,
+      quotedMessageId: message.quotedMessage?.id,
+      quotedMessageText: message.quotedMessage?.text
+    };
+    const run = await this.workflow.createRun();
+    const result = await run.start({ inputData: workflowInput });
+    await this.handleWorkflowResult(result, run.runId, sessionKey, message, context);
+  }
+  /**
+   * Handle resume of suspended workflow
+   */
+  async handleResume(message, sessionKey, suspendedRun, context) {
+    if (!this.workflow) {
+      throw new Error("Workflow not initialized");
+    }
+    const resumeData = this.parseResumeData(
+      message.text || "",
+      suspendedRun.suspendPayload.missingFields
+    );
+    console.log(`[${sessionKey}] Resume data: ${JSON.stringify(resumeData)}`);
+    const run = await this.workflow.createRun({ runId: suspendedRun.runId });
+    const result = await run.resume({
+      step: suspendedRun.suspendedStep,
+      resumeData
+    });
+    this.suspendedRuns.delete(sessionKey);
+    await this.handleWorkflowResult(result, run.runId, sessionKey, message, context);
+  }
+  /**
+   * Handle workflow result (success, suspended, failed)
+   */
+  async handleWorkflowResult(result, runId, sessionKey, message, context) {
+    console.log(`[${sessionKey}] Workflow result: status=${result.status}`);
+    if (result.status === "success") {
+      const output = result.result;
+      console.log(`[${sessionKey}] Workflow output:`, JSON.stringify(output, null, 2));
+      if (!output?.message) {
+        console.log(`[${sessionKey}] \u26A0\uFE0F No message in workflow output, falling back to agent`);
+        await this.handleWithAgent(message, sessionKey, context);
+        return;
+      }
+      console.log(`[${sessionKey}] \u2705 Workflow success: ${output.message.substring(0, 100)}`);
+      await this.sendResponse(message, { text: output.message });
+      message.replyToken = void 0;
+      if (this.insightsAgent && output.expenseId) {
+        console.log(`[${sessionKey}] \u{1F4A1} Running Insights for expense`);
+        try {
+          const insightsResponse = await this.callInsightsAgent(message, context, "expense");
+          if (insightsResponse && insightsResponse.trim() !== "SILENT") {
+            console.log(`[${sessionKey}] \u{1F4A1} Insights: ${insightsResponse.substring(0, 100)}`);
+            await this.sendResponse(message, { text: insightsResponse });
+          }
+        } catch (error) {
+          console.error(`[${sessionKey}] Insights error (non-fatal):`, error);
+        }
+      }
+    } else if (result.status === "suspended") {
+      const suspendPayload = result.suspendPayload;
+      const suspendedPaths = result.suspended;
+      const lastPath = suspendedPaths?.[suspendedPaths.length - 1];
+      const suspendedStep = lastPath?.[lastPath.length - 1] || "unknown";
+      console.log(`[${sessionKey}] \u23F8\uFE0F Workflow suspended at: ${suspendedStep}`);
+      console.log(`[${sessionKey}] Missing fields: ${suspendPayload.missingFields.join(", ")}`);
+      this.suspendedRuns.set(sessionKey, {
+        runId,
+        workflowId: "messageWorkflow",
+        suspendedStep,
+        suspendPayload,
+        originalMessage: message,
+        context,
+        createdAt: Date.now()
+      });
+      await this.sendResponse(message, { text: suspendPayload.prompt });
+    } else if (result.status === "failed") {
+      const errorMsg = result.error?.message || "Unknown error";
+      console.error(`[${sessionKey}] \u274C Workflow failed: ${errorMsg}`);
+      const text = context.userLanguage === "en" ? `Error: ${errorMsg}` : `\u0E40\u0E01\u0E34\u0E14\u0E02\u0E49\u0E2D\u0E1C\u0E34\u0E14\u0E1E\u0E25\u0E32\u0E14: ${errorMsg}`;
+      await this.sendResponse(message, { text });
+    } else {
+      const output = result.result;
+      if (output?.status === "fallback") {
+        console.log(`[${sessionKey}] \u{1F504} Workflow fallback: ${output.fallbackReason}`);
+        await this.handleWithAgent(message, sessionKey, context);
+      } else {
+        console.warn(`[${sessionKey}] Unexpected workflow status: ${result.status}`);
+        await this.handleWithAgent(message, sessionKey, context);
+      }
+    }
+  }
+  /**
+   * Parse user's reply to extract resume data
+   */
+  parseResumeData(text, missingFields) {
+    const parsed = parseExpenseText(text);
+    const resumeData = {};
+    if (missingFields.includes("amount") && parsed.amount) {
+      resumeData.amount = parsed.amount;
+    }
+    if (missingFields.includes("description") && parsed.description) {
+      resumeData.description = parsed.description;
+    }
+    if (missingFields.includes("splitInfo") && parsed.splitTargets.length > 0) {
+      resumeData.splitTargets = parsed.splitTargets;
+    }
+    if (!resumeData.description && !resumeData.amount && text.trim()) {
+      const numMatch = text.match(/^\s*(\d+(?:\.\d{2})?)\s*$/);
+      if (numMatch) {
+        resumeData.amount = parseFloat(numMatch[1]);
+      } else {
+        resumeData.description = text.trim();
+      }
+    }
+    return resumeData;
+  }
+  /**
+   * Handle message with agent (fallback)
+   * Runs both Bookkeeper and Insights agents in parallel when appropriate
+   */
+  async handleWithAgent(message, sessionKey, context) {
+    const taskComplexity = this.detectComplexity(message);
+    if (taskComplexity === "high" && (message.imageUrl || message.imageBase64)) {
+      await this.sendResponse(message, { text: "\u{1F4F8} Thanks! Working on it..." });
+      message.replyToken = void 0;
+    }
+    const intent = this.detectMessageIntent(message);
+    console.log(`[${sessionKey}] Intent: ${intent}`);
+    const agentInput = this.formatAgentInput(message, context);
+    const shouldRunInsights = this.insightsAgent && (intent === "expense" || intent === "insight_query");
+    if (shouldRunInsights && this.insightsAgent) {
+      console.log(`[${sessionKey}] \u{1F500} Running PARALLEL agents (Bookkeeper + Insights)`);
+      const [bookkeeperResult, insightsResult] = await Promise.allSettled([
+        // Bookkeeper (skip for insight-only queries)
+        intent !== "insight_query" ? this.callAgent(agentInput, message.source.id, message.channel, context, taskComplexity) : Promise.resolve(null),
+        // Insights
+        this.callInsightsAgent(message, context, intent)
+      ]);
+      if (bookkeeperResult.status === "fulfilled" && bookkeeperResult.value) {
+        console.log(`[${sessionKey}] \u{1F916} Bookkeeper: ${bookkeeperResult.value.substring(0, 100)}`);
+        await this.sendResponse(message, { text: bookkeeperResult.value });
+        message.replyToken = void 0;
+      } else if (bookkeeperResult.status === "rejected") {
+        console.error(`[${sessionKey}] \u274C Bookkeeper error:`, bookkeeperResult.reason);
+      }
+      if (insightsResult.status === "fulfilled" && insightsResult.value) {
+        const insightsResponse = insightsResult.value.trim();
+        if (insightsResponse && insightsResponse !== "SILENT") {
+          console.log(`[${sessionKey}] \u{1F4A1} Insights: ${insightsResponse.substring(0, 100)}`);
+          await this.sendResponse(message, { text: insightsResponse });
+        } else {
+          console.log(`[${sessionKey}] \u{1F4A1} Insights: (silent)`);
+        }
+      } else if (insightsResult.status === "rejected") {
+        console.error(`[${sessionKey}] \u274C Insights error:`, insightsResult.reason);
+      }
+    } else {
+      console.log(`[${sessionKey}] \u{1F916} Running SINGLE agent (Bookkeeper only)`);
+      const response = await this.callAgent(
+        agentInput,
+        message.source.id,
+        message.channel,
+        context,
+        taskComplexity
+      );
+      console.log(`[${sessionKey}] Agent response: ${response?.substring(0, 200) || "(no response)"}`);
+      if (response) {
+        await this.sendResponse(message, { text: response });
+      }
+    }
+  }
+  /**
+   * Detect message intent for agent routing
+   */
+  detectMessageIntent(message) {
+    const text = (message.text || "").toLowerCase().trim();
+    const expensePatterns = [
+      /^\d+(?:\.\d{2})?$/,
+      // Just a number
+      /^[฿$€]\d+/,
+      // Currency + number
+      /\d+(?:\.\d{2})?\s*(?:THB|บาท|USD|EUR)/i,
+      /^\w+\s+\d+/,
+      // "coffee 65"
+      /^\d+\s+\w+/
+      // "65 coffee"
+    ];
+    if (message.imageUrl || message.imageBase64) {
+      return "expense";
+    }
+    const insightQueryPatterns = [
+      /have i bought/i,
+      /did i buy/i,
+      /ซื้อ.*หรือยัง/i,
+      /ซื้อ.*ไหม/i,
+      /เคยซื้อ/i,
+      /bought.*recently/i,
+      /what.*groceries/i,
+      /ซื้ออะไร.*บ้าง/i
+    ];
+    for (const pattern of insightQueryPatterns) {
+      if (pattern.test(text)) {
+        return "insight_query";
+      }
+    }
+    const queryPatterns = [
+      /who owes/i,
+      /ใครเป็นหนี้/i,
+      /balance/i,
+      /ยอด/i,
+      /summary/i,
+      /สรุป/i,
+      /list expenses/i,
+      /show expenses/i,
+      /expenses/i
+    ];
+    for (const pattern of queryPatterns) {
+      if (pattern.test(text)) {
+        return "query";
+      }
+    }
+    const settlementPatterns = [
+      /paid/i,
+      /จ่าย.*แล้ว/i,
+      /โอน.*แล้ว/i,
+      /settle/i
+    ];
+    for (const pattern of settlementPatterns) {
+      if (pattern.test(text)) {
+        return "settlement";
+      }
+    }
+    const helpPatterns = [
+      /help/i,
+      /ช่วย/i,
+      /how to/i,
+      /วิธี/i
+    ];
+    for (const pattern of helpPatterns) {
+      if (pattern.test(text)) {
+        return "help";
+      }
+    }
+    for (const pattern of expensePatterns) {
+      if (pattern.test(text)) {
+        return "expense";
+      }
+    }
+    return "other";
+  }
+  /**
+   * Call Insights Agent
+   */
+  async callInsightsAgent(message, context, intent) {
+    if (!this.insightsAgent) {
+      return null;
+    }
+    const isExpenseMessage = intent === "expense";
+    let expenseItems = [];
+    if (isExpenseMessage && message.text) {
+      const parsed = parseExpenseText(message.text);
+      if (parsed.description) {
+        expenseItems = [{ name: parsed.description }];
+      }
+    }
+    const contextLines = [
+      `[Context]`,
+      `Channel: ${context.channel}`,
+      `SenderChannelId: ${context.senderChannelId}`,
+      `SourceChannelId: ${context.sourceChannelId}`,
+      `IsGroup: ${context.isGroup}`,
+      `isExpenseMessage: ${isExpenseMessage}`
+    ];
+    if (expenseItems.length > 0) {
+      contextLines.push(`expenseItems: ${JSON.stringify(expenseItems)}`);
+    }
+    const messageText = message.text || "";
+    const content = `${contextLines.join("\n")}
+
+[Message]
+${messageText}`;
+    const requestContext = new RequestContext();
+    requestContext.set("userLanguage", context.userLanguage || "th");
+    requestContext.set("userTimezone", context.userTimezone || "Asia/Bangkok");
+    requestContext.set("channel", context.channel);
+    requestContext.set("senderChannelId", context.senderChannelId);
+    requestContext.set("sourceChannelId", context.sourceChannelId);
+    requestContext.set("isGroup", context.isGroup);
+    requestContext.set("isExpenseMessage", isExpenseMessage);
+    requestContext.set("expenseItems", expenseItems);
+    try {
+      const result = await this.insightsAgent.generate(content, {
+        requestContext,
+        toolChoice: "auto",
+        maxSteps: 3
+      });
+      return result.text || null;
+    } catch (error) {
+      console.error(`[Insights] Agent error:`, error);
+      return null;
+    }
+  }
+  /**
+   * Send response via the appropriate channel
+   */
+  async sendResponse(originalMessage, response) {
+    const adapter = this.adapters.get(originalMessage.channel);
+    if (!adapter) {
+      console.error(`No adapter for channel: ${originalMessage.channel}`);
+      return;
+    }
+    await adapter.send(
+      originalMessage.source.id,
+      response,
+      originalMessage.replyToken
+    );
+  }
+  /**
+   * Detect task complexity for model routing
+   */
+  detectComplexity(message) {
+    if (message.imageUrl || message.imageBase64) {
+      return "high";
+    }
+    return "simple";
+  }
+  /**
+   * Build context for agent tools
+   */
+  async buildAgentContext(message) {
+    const prefs = await this.getUserPreferences(message.channel, message.sender.id);
+    return {
+      channel: message.channel,
+      senderChannelId: message.sender.id,
+      sourceChannelId: message.source.id,
+      isGroup: message.source.type === "group",
+      senderName: message.sender.name,
+      sourceName: message.source.name,
+      userLanguage: prefs?.language,
+      userTimezone: prefs?.timezone
+    };
+  }
+  /**
+   * Get user preferences (with caching)
+   */
+  async getUserPreferences(channel, userId) {
+    const cacheKey = `${channel}:${userId}`;
+    const cached = this.userPrefsCache.get(cacheKey);
+    if (cached && Date.now() - cached.fetchedAt < this.PREFS_CACHE_TTL_MS) {
+      return cached;
+    }
+    try {
+      const context = {
+        channel,
+        senderChannelId: userId,
+        sourceChannelId: userId
+      };
+      const data = await apiRequest("GET", "/users/me", context);
+      const prefs = {
+        language: data.user?.language === "en" ? "en" : "th",
+        timezone: data.user?.timezone || "Asia/Bangkok",
+        currency: data.user?.currency || "THB",
+        fetchedAt: Date.now()
+      };
+      this.userPrefsCache.set(cacheKey, prefs);
+      console.log(`[Gateway] Loaded user prefs: language=${prefs.language}, currency=${prefs.currency}`);
+      return prefs;
+    } catch (error) {
+      console.log(`[Gateway] User prefs not found (will use defaults)`);
+      return null;
+    }
+  }
+  /**
+   * Invalidate user preferences cache
+   */
+  invalidateUserPrefs(channel, userId) {
+    const cacheKey = `${channel}:${userId}`;
+    this.userPrefsCache.delete(cacheKey);
+  }
+  /**
+   * Format message for agent input
+   */
+  formatAgentInput(message, context) {
+    const contextLines = [
+      `[Context]`,
+      `Channel: ${context.channel}`,
+      `SenderChannelId: ${context.senderChannelId}`,
+      `SourceChannelId: ${context.sourceChannelId}`,
+      `IsGroup: ${context.isGroup}`
+    ];
+    if (context.senderName) {
+      contextLines.push(`SenderName: ${context.senderName}`);
+    }
+    if (context.sourceName) {
+      contextLines.push(`SourceName: ${context.sourceName}`);
+    }
+    if (message.quotedMessage) {
+      contextLines.push(`QuotedMessageId: ${message.quotedMessage.id}`);
+      if (message.quotedMessage.text) {
+        contextLines.push(`QuotedText: ${message.quotedMessage.text}`);
+      }
+    }
+    let messageText = message.text || "";
+    if (message.source.type === "group") {
+      const senderLabel = message.sender.name || message.sender.id;
+      messageText = `[From: ${senderLabel}]
+${messageText}`;
+    }
+    const textContent = `${contextLines.join("\n")}
+
+[Message]
+${messageText}`;
+    if (message.imageUrl) {
+      console.log(`[GATEWAY] \u{1F9FE} Receipt: ${message.imageUrl}`);
+      return textContent + `
+
+[Receipt Image]
+ImageURL: ${message.imageUrl}`;
+    }
+    return textContent;
+  }
+  /**
+   * Call the Billog agent
+   */
+  async callAgent(input, sourceId, channel, context, taskComplexity) {
+    if (!this.agent) {
+      throw new Error("Agent not initialized");
+    }
+    const messages = Array.isArray(input) ? [{ role: "user", content: input }] : input;
+    const requestContext = new RequestContext();
+    requestContext.set("userLanguage", context.userLanguage || "th");
+    requestContext.set("userTimezone", context.userTimezone || "Asia/Bangkok");
+    requestContext.set("channel", context.channel);
+    requestContext.set("senderChannelId", context.senderChannelId);
+    requestContext.set("sourceChannelId", context.sourceChannelId);
+    requestContext.set("isGroup", context.isGroup);
+    if (context.senderName) requestContext.set("senderName", context.senderName);
+    if (context.sourceName) requestContext.set("sourceName", context.sourceName);
+    requestContext.set("taskComplexity", taskComplexity);
+    const result = await this.agent.generate(messages, {
+      memory: {
+        thread: sourceId,
+        resource: `${channel}:${sourceId}`
+      },
+      requestContext,
+      toolChoice: "auto",
+      maxSteps: 5
+    });
+    return result.text || null;
+  }
+  // ===========================================
+  // Session Locking
+  // ===========================================
+  async acquireLock(sessionKey) {
+    while (this.sessionLocks.has(sessionKey)) {
+      await this.sessionLocks.get(sessionKey);
+    }
+    let releaseLock;
+    const lockPromise = new Promise((resolve) => {
+      releaseLock = resolve;
+    });
+    lockPromise.__release = releaseLock;
+    this.sessionLocks.set(sessionKey, lockPromise);
+  }
+  releaseLock(sessionKey) {
+    const lock = this.sessionLocks.get(sessionKey);
+    if (lock) {
+      lock.__release?.();
+      this.sessionLocks.delete(sessionKey);
+    }
+  }
+  // ===========================================
+  // Cleanup
+  // ===========================================
+  cleanupExpiredRuns() {
+    const now = Date.now();
+    for (const [key, run] of this.suspendedRuns) {
+      if (now - run.createdAt > this.SUSPENDED_RUN_TTL_MS) {
+        console.log(`[Gateway] Cleaning up expired suspended run: ${key}`);
+        this.suspendedRuns.delete(key);
+      }
+    }
+  }
+  async shutdown() {
+    for (const adapter of this.adapters.values()) {
+      await adapter.shutdown?.();
+    }
+    this.adapters.clear();
+    this.suspendedRuns.clear();
+    console.log("Gateway router shutdown complete");
+  }
+}
+function createGateway(config) {
+  return new GatewayRouter(config);
+}
+
+"use strict";
+class WhatsAppAdapter extends EventEmitter {
+  channel = "WHATSAPP";
+  sock = null;
+  sessionPath;
+  messageHandler = null;
+  botJid = null;
+  constructor(config = {}) {
+    super();
+    this.sessionPath = config.sessionPath || "./data/whatsapp";
+  }
+  /**
+   * Set message handler (called when message received)
+   */
+  onMessage(handler) {
+    this.messageHandler = handler;
+  }
+  /**
+   * Initialize WhatsApp connection
+   */
+  async initialize() {
+    let baileys;
+    try {
+      baileys = await import('@whiskeysockets/baileys');
+    } catch {
+      console.log("\u26A0\uFE0F WhatsApp: baileys not installed, skipping WhatsApp adapter");
+      return;
+    }
+    const {
+      makeWASocket,
+      DisconnectReason,
+      useMultiFileAuthState,
+      fetchLatestBaileysVersion
+    } = baileys;
+    const { state, saveCreds } = await useMultiFileAuthState(this.sessionPath);
+    const { version } = await fetchLatestBaileysVersion();
+    this.sock = makeWASocket({
+      version,
+      auth: state,
+      printQRInTerminal: true,
+      // Reduce noise
+      logger: {
+        level: "silent",
+        child: () => ({ level: "silent" }),
+        trace: () => {
+        },
+        debug: () => {
+        },
+        info: () => {
+        },
+        warn: console.warn,
+        error: console.error,
+        fatal: console.error
+      }
+    });
+    this.sock.ev.on("creds.update", saveCreds);
+    this.sock.ev.on("connection.update", (update) => {
+      const { connection, lastDisconnect, qr } = update;
+      if (qr) {
+        console.log("\u{1F4F1} WhatsApp: Scan QR code to connect");
+      }
+      if (connection === "close") {
+        const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+        if (shouldReconnect) {
+          console.log("WhatsApp: Reconnecting...");
+          this.initialize();
+        } else {
+          console.log("WhatsApp: Logged out");
+        }
+      }
+      if (connection === "open") {
+        this.botJid = this.sock?.user?.id || null;
+        console.log(`\u2713 WhatsApp adapter connected: ${this.sock?.user?.name || "Unknown"}`);
+      }
+    });
+    this.sock.ev.on("messages.upsert", async (m) => {
+      for (const msg of m.messages) {
+        if (msg.key.fromMe) continue;
+        const inbound = this.parseMessage(msg);
+        if (inbound && this.messageHandler) {
+          try {
+            await this.messageHandler(inbound);
+          } catch (error) {
+            console.error("WhatsApp message handler error:", error);
+          }
+        }
+      }
+    });
+  }
+  /**
+   * Parse webhook is not used for WhatsApp (uses socket events)
+   */
+  async parseWebhook(_payload) {
+    return [];
+  }
+  /**
+   * Send response via WhatsApp
+   */
+  async send(sourceId, response, _replyToken) {
+    if (!this.sock) {
+      throw new Error("WhatsApp not connected");
+    }
+    if (response.text) {
+      await this.sock.sendMessage(sourceId, { text: response.text });
+    }
+    if (response.imageUrl) {
+      await this.sock.sendMessage(sourceId, {
+        image: { url: response.imageUrl },
+        caption: response.text ? void 0 : "Image"
+        // Only add caption if no text sent
+      });
+    }
+  }
+  /**
+   * Shutdown connection
+   */
+  async shutdown() {
+    if (this.sock) {
+      await this.sock.logout();
+      this.sock = null;
+    }
+  }
+  // ===========================================
+  // Private helpers
+  // ===========================================
+  parseMessage(msg) {
+    const jid = msg.key.remoteJid;
+    if (!jid) return null;
+    const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || msg.message?.imageMessage?.caption;
+    const isGroup = jid.endsWith("@g.us");
+    const sourceType = isGroup ? "group" : "dm";
+    const senderId = isGroup ? msg.key.participant || "unknown" : jid.split("@")[0];
+    const mentions = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+    const botMentioned = this.botJid ? mentions.includes(this.botJid) : false;
+    return {
+      id: msg.key.id || `wa-${Date.now()}`,
+      channel: "WHATSAPP",
+      text,
+      sender: {
+        id: senderId,
+        name: msg.pushName
+      },
+      source: {
+        id: jid,
+        type: sourceType
+      },
+      mentions: botMentioned ? [this.botJid] : mentions,
+      timestamp: new Date((msg.messageTimestamp || Date.now()) * 1e3)
+    };
+  }
+  /**
+   * Get JID from phone number
+   */
+  formatJid(phoneNumber) {
+    const cleaned = phoneNumber.replace(/\D/g, "");
+    return `${cleaned}@s.whatsapp.net`;
+  }
+  /**
+   * Check if connected
+   */
+  get connected() {
+    return this.sock !== null;
+  }
+}
+
+"use strict";
+
+"use strict";
 const ChannelSchema = z.enum(["LINE", "WHATSAPP", "TELEGRAM"]);
 const LanguageSchema = z.enum(["th", "en"]);
 const MessageInputSchema = z.object({
@@ -3367,10 +4904,10 @@ const MessageWorkflowStateSchema = z.object({
   sourceInitialized: z.boolean().default(false),
   isNewSource: z.boolean().default(false),
   isNewUser: z.boolean().default(false),
-  // Message type detection
-  messageType: z.enum(["expense_text", "expense_receipt", "query", "settlement", "help", "other"]).nullable(),
+  // Message type detection (nullable with default)
+  messageType: z.enum(["expense_text", "expense_receipt", "query", "settlement", "help", "other"]).nullable().default(null),
   // Parsed expense (accumulated from parse/OCR steps)
-  parsedExpense: ParsedExpenseSchema.nullable(),
+  parsedExpense: ParsedExpenseSchema.nullable().default(null),
   // OCR specific
   isReceipt: z.boolean().default(false),
   // Validation
@@ -3382,11 +4919,11 @@ const MessageWorkflowStateSchema = z.object({
     name: z.string().nullable(),
     nickname: z.string().nullable()
   })).default([]),
-  // Result
-  expenseId: z.string().nullable(),
-  responseMessage: z.string().nullable(),
-  // Error handling
-  error: z.string().nullable()
+  // Result (nullable with default)
+  expenseId: z.string().nullable().default(null),
+  responseMessage: z.string().nullable().default(null),
+  // Error handling (nullable with default)
+  error: z.string().nullable().default(null)
 });
 const initialMessageWorkflowState = {
   sourceInitialized: false,
@@ -3568,18 +5105,9 @@ ${"=".repeat(60)}`);
 
 "use strict";
 const genAI$1 = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY || "");
-const EXTRACT_TEXT_PROMPT$1 = `Extract ALL text from this image exactly as shown.
-Include every word, number, and symbol visible.
-Return ONLY the raw text, no formatting or explanation.`;
 const categoryList$1 = Object.keys(CATEGORIES).join("|");
-const ANALYZE_TEXT_PROMPT$1 = `Analyze this receipt text and extract structured data as JSON.
+const OCR_PROMPT$1 = `Extract and analyze this receipt image. Return JSON only.
 
-Receipt text:
----
-{TEXT}
----
-
-Return JSON:
 {
   "isReceipt": true/false,
   "storeName": "store name in English",
@@ -3690,13 +5218,11 @@ ${"=".repeat(60)}`);
       } else {
         imageData = await downloadImage$1(inputData.imageUrl);
       }
-      console.log("[OCR] Extracting text...");
-      const rawText = await callGemini$1("gemini-2.0-flash", [
-        EXTRACT_TEXT_PROMPT$1,
+      console.log("[OCR] Processing receipt...");
+      const analysisText = await callGemini$1("gemini-2.0-flash", [
+        OCR_PROMPT$1,
         { inlineData: { data: imageData.data, mimeType: imageData.mimeType } }
       ]);
-      console.log("[OCR] Analyzing text...");
-      const analysisText = await callGemini$1("gemini-2.0-flash", [ANALYZE_TEXT_PROMPT$1.replace("{TEXT}", rawText)]);
       const ocrResult = parseJSON$1(analysisText);
       if (!ocrResult.isReceipt) {
         setState({ ...state, messageType: "expense_receipt", isReceipt: false });
@@ -4412,18 +5938,9 @@ ${"=".repeat(60)}`);
 
 "use strict";
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY || "");
-const EXTRACT_TEXT_PROMPT = `Extract ALL text from this image exactly as shown.
-Include every word, number, and symbol visible.
-Return ONLY the raw text, no formatting or explanation.`;
 const categoryList = Object.keys(CATEGORIES).join("|");
-const ANALYZE_TEXT_PROMPT = `Analyze this receipt text and extract structured data as JSON.
+const OCR_PROMPT = `Extract and analyze this receipt image. Return JSON only.
 
-Receipt text:
----
-{TEXT}
----
-
-Return JSON:
 {
   "isReceipt": true/false,
   "storeName": "store name in English",
@@ -4540,13 +6057,11 @@ ${"=".repeat(60)}`);
       } else {
         imageData = await downloadImage(inputData.imageUrl);
       }
-      console.log("[OCR] Extracting text...");
-      const rawText = await callGemini("gemini-2.0-flash", [
-        EXTRACT_TEXT_PROMPT,
+      console.log("[OCR] Processing receipt...");
+      const analysisText = await callGemini("gemini-2.0-flash", [
+        OCR_PROMPT,
         { inlineData: { data: imageData.data, mimeType: imageData.mimeType } }
       ]);
-      console.log("[OCR] Analyzing text...");
-      const analysisText = await callGemini("gemini-2.0-flash", [ANALYZE_TEXT_PROMPT.replace("{TEXT}", rawText)]);
       const ocrResult = parseJSON(analysisText);
       if (!ocrResult.isReceipt) {
         setState({ ...state, messageType: "expense_receipt", isReceipt: false });
@@ -4983,650 +6498,15 @@ function shouldUseWorkflow(message) {
 "use strict";
 
 "use strict";
-class GatewayRouter {
-  adapters = /* @__PURE__ */ new Map();
-  config;
-  mastra = null;
-  agent = null;
-  workflow = null;
-  // Simple in-memory lock per session (prevent concurrent runs)
-  sessionLocks = /* @__PURE__ */ new Map();
-  // User preferences cache (key: channel:userId)
-  userPrefsCache = /* @__PURE__ */ new Map();
-  PREFS_CACHE_TTL_MS = 60 * 60 * 1e3;
-  // 1 hour
-  // Suspended workflow runs (key: sessionKey)
-  suspendedRuns = /* @__PURE__ */ new Map();
-  SUSPENDED_RUN_TTL_MS = 5 * 60 * 1e3;
-  // 5 minutes timeout
-  constructor(config) {
-    this.config = config;
+function getMastraDbUrl() {
+  if (process.env.MASTRA_DATABASE_URL) {
+    return process.env.MASTRA_DATABASE_URL;
   }
-  /**
-   * Initialize the gateway with adapters
-   */
-  async initialize(mastra) {
-    this.mastra = mastra;
-    this.agent = mastra.getAgent("billog");
-    if (!this.agent) {
-      throw new Error("Billog agent not found in Mastra instance");
-    }
-    this.workflow = mastra.getWorkflow("messageWorkflow");
-    if (!this.workflow) {
-      console.warn("Message workflow not found - will use agent only");
-    } else {
-      console.log("\u2713 Message workflow registered");
-    }
-    if (this.config.line) {
-      const lineAdapter = new LineAdapter({
-        channelAccessToken: this.config.line.channelAccessToken,
-        channelSecret: this.config.line.channelSecret,
-        uploadsDir: this.config.line.uploadsDir,
-        baseUrl: this.config.line.baseUrl
-      });
-      await lineAdapter.initialize();
-      this.adapters.set("LINE", lineAdapter);
-    }
-    console.log(`\u2713 Gateway router initialized with ${this.adapters.size} adapter(s)`);
-    setInterval(() => this.cleanupExpiredRuns(), 6e4);
+  if (process.env.NODE_ENV === "production") {
+    return "file:/app/data/mastra.db";
   }
-  /**
-   * Get adapter by channel
-   */
-  getAdapter(channel) {
-    return this.adapters.get(channel);
-  }
-  /**
-   * Handle LINE webhook
-   */
-  async handleLineWebhook(body, signature) {
-    const adapter = this.adapters.get("LINE");
-    if (!adapter) {
-      throw new Error("LINE adapter not initialized");
-    }
-    const bodyStr = typeof body === "string" ? body : JSON.stringify(body);
-    if (!adapter.verifySignature(bodyStr, signature)) {
-      throw new Error("Invalid LINE signature");
-    }
-    const messages = await adapter.parseWebhook(body);
-    for (const msg of messages) {
-      await this.handleMessage(msg);
-    }
-  }
-  /**
-   * Handle incoming message from any channel
-   */
-  async handleMessage(message) {
-    console.log(`
-${"=".repeat(60)}`);
-    console.log(`[GATEWAY] \u{1F4E5} INBOUND MESSAGE`);
-    console.log(`${"=".repeat(60)}`);
-    console.log(`  Channel:    ${message.channel}`);
-    console.log(`  Source ID:  ${message.source.id}`);
-    console.log(`  Source:     ${message.source.type} - ${message.source.name || "N/A"}`);
-    console.log(`  Sender ID:  ${message.sender.id}`);
-    console.log(`  Sender:     ${message.sender.name || "N/A"}`);
-    console.log(`  Text:       ${message.text?.substring(0, 100) || "(no text)"}`);
-    if (message.imageUrl) {
-      console.log(`  Image URL:  ${message.imageUrl}`);
-    }
-    console.log(`${"=".repeat(60)}
-`);
-    const activationMode = this.config.groupActivation?.mode || "mention";
-    const mentionPatterns = this.config.groupActivation?.mentionPatterns || ["@billog", "billog"];
-    if (!shouldActivate(message, activationMode, mentionPatterns)) {
-      console.log(`[${message.channel}] Skipping (not activated): ${message.text?.substring(0, 50)}`);
-      return;
-    }
-    const sessionKey = makeSessionKey(message.channel, message.source.id);
-    await this.acquireLock(sessionKey);
-    let context = null;
-    try {
-      console.log(`[${sessionKey}] Processing: ${message.text?.substring(0, 50) || "(no text)"}`);
-      context = await this.buildAgentContext(message);
-      console.log(`[${sessionKey}] Context: language=${context.userLanguage}, isGroup=${context.isGroup}`);
-      const suspendedRun = this.suspendedRuns.get(sessionKey);
-      if (suspendedRun) {
-        console.log(`[${sessionKey}] Resuming suspended workflow: ${suspendedRun.runId}`);
-        await this.handleResume(message, sessionKey, suspendedRun, context);
-        return;
-      }
-      const useWorkflow = this.workflow && shouldUseWorkflow({
-        text: message.text,
-        imageUrl: message.imageUrl,
-        imageBase64: message.imageBase64
-      });
-      if (useWorkflow) {
-        console.log(`[${sessionKey}] \u{1F504} Using WORKFLOW`);
-        await this.handleWithWorkflow(message, sessionKey, context);
-      } else {
-        console.log(`[${sessionKey}] \u{1F916} Using AGENT (fallback)`);
-        await this.handleWithAgent(message, sessionKey, context);
-      }
-    } catch (error) {
-      console.error(`[${sessionKey}] \u274C Error:`, error);
-      await this.sendResponse(message, {
-        text: context?.userLanguage === "en" ? "Sorry, an error occurred. Please try again." : "\u0E02\u0E2D\u0E2D\u0E20\u0E31\u0E22 \u0E40\u0E01\u0E34\u0E14\u0E02\u0E49\u0E2D\u0E1C\u0E34\u0E14\u0E1E\u0E25\u0E32\u0E14 \u0E01\u0E23\u0E38\u0E13\u0E32\u0E25\u0E2D\u0E07\u0E43\u0E2B\u0E21\u0E48\u0E2D\u0E35\u0E01\u0E04\u0E23\u0E31\u0E49\u0E07"
-      });
-    } finally {
-      this.releaseLock(sessionKey);
-    }
-  }
-  /**
-   * Handle message with workflow
-   */
-  async handleWithWorkflow(message, sessionKey, context) {
-    if (!this.workflow) {
-      throw new Error("Workflow not initialized");
-    }
-    if (message.imageUrl || message.imageBase64) {
-      const ackMessage = context.userLanguage === "en" ? "\u{1F4F8} Got it! Processing..." : "\u{1F4F8} \u0E44\u0E14\u0E49\u0E23\u0E31\u0E1A\u0E41\u0E25\u0E49\u0E27! \u0E01\u0E33\u0E25\u0E31\u0E07\u0E1B\u0E23\u0E30\u0E21\u0E27\u0E25\u0E1C\u0E25...";
-      await this.sendResponse(message, { text: ackMessage });
-      message.replyToken = void 0;
-    }
-    const prefs = await this.getUserPreferences(message.channel, message.sender.id);
-    const workflowInput = {
-      channel: message.channel,
-      senderChannelId: message.sender.id,
-      sourceChannelId: message.source.id,
-      isGroup: message.source.type === "group",
-      senderName: message.sender.name,
-      sourceName: message.source.name,
-      userLanguage: prefs?.language || "th",
-      userCurrency: prefs?.currency || "THB",
-      userTimezone: prefs?.timezone || "Asia/Bangkok",
-      messageText: message.text,
-      imageUrl: message.imageUrl,
-      imageBase64: message.imageBase64,
-      quotedMessageId: message.quotedMessage?.id,
-      quotedMessageText: message.quotedMessage?.text
-    };
-    const run = await this.workflow.createRun();
-    const result = await run.start({ inputData: workflowInput });
-    await this.handleWorkflowResult(result, run.runId, sessionKey, message, context);
-  }
-  /**
-   * Handle resume of suspended workflow
-   */
-  async handleResume(message, sessionKey, suspendedRun, context) {
-    if (!this.workflow) {
-      throw new Error("Workflow not initialized");
-    }
-    const resumeData = this.parseResumeData(
-      message.text || "",
-      suspendedRun.suspendPayload.missingFields
-    );
-    console.log(`[${sessionKey}] Resume data: ${JSON.stringify(resumeData)}`);
-    const run = await this.workflow.createRun({ runId: suspendedRun.runId });
-    const result = await run.resume({
-      step: suspendedRun.suspendedStep,
-      resumeData
-    });
-    this.suspendedRuns.delete(sessionKey);
-    await this.handleWorkflowResult(result, run.runId, sessionKey, message, context);
-  }
-  /**
-   * Handle workflow result (success, suspended, failed)
-   */
-  async handleWorkflowResult(result, runId, sessionKey, message, context) {
-    console.log(`[${sessionKey}] Workflow result: status=${result.status}`);
-    if (result.status === "success") {
-      const output = result.result;
-      console.log(`[${sessionKey}] \u2705 Workflow success: ${output.message.substring(0, 100)}`);
-      await this.sendResponse(message, { text: output.message });
-    } else if (result.status === "suspended") {
-      const suspendPayload = result.suspendPayload;
-      const suspendedPaths = result.suspended;
-      const lastPath = suspendedPaths?.[suspendedPaths.length - 1];
-      const suspendedStep = lastPath?.[lastPath.length - 1] || "unknown";
-      console.log(`[${sessionKey}] \u23F8\uFE0F Workflow suspended at: ${suspendedStep}`);
-      console.log(`[${sessionKey}] Missing fields: ${suspendPayload.missingFields.join(", ")}`);
-      this.suspendedRuns.set(sessionKey, {
-        runId,
-        workflowId: "messageWorkflow",
-        suspendedStep,
-        suspendPayload,
-        originalMessage: message,
-        context,
-        createdAt: Date.now()
-      });
-      await this.sendResponse(message, { text: suspendPayload.prompt });
-    } else if (result.status === "failed") {
-      const errorMsg = result.error?.message || "Unknown error";
-      console.error(`[${sessionKey}] \u274C Workflow failed: ${errorMsg}`);
-      const text = context.userLanguage === "en" ? `Error: ${errorMsg}` : `\u0E40\u0E01\u0E34\u0E14\u0E02\u0E49\u0E2D\u0E1C\u0E34\u0E14\u0E1E\u0E25\u0E32\u0E14: ${errorMsg}`;
-      await this.sendResponse(message, { text });
-    } else {
-      const output = result.result;
-      if (output?.status === "fallback") {
-        console.log(`[${sessionKey}] \u{1F504} Workflow fallback: ${output.fallbackReason}`);
-        await this.handleWithAgent(message, sessionKey, context);
-      } else {
-        console.warn(`[${sessionKey}] Unexpected workflow status: ${result.status}`);
-        await this.handleWithAgent(message, sessionKey, context);
-      }
-    }
-  }
-  /**
-   * Parse user's reply to extract resume data
-   */
-  parseResumeData(text, missingFields) {
-    const parsed = parseExpenseText(text);
-    const resumeData = {};
-    if (missingFields.includes("amount") && parsed.amount) {
-      resumeData.amount = parsed.amount;
-    }
-    if (missingFields.includes("description") && parsed.description) {
-      resumeData.description = parsed.description;
-    }
-    if (missingFields.includes("splitInfo") && parsed.splitTargets.length > 0) {
-      resumeData.splitTargets = parsed.splitTargets;
-    }
-    if (!resumeData.description && !resumeData.amount && text.trim()) {
-      const numMatch = text.match(/^\s*(\d+(?:\.\d{2})?)\s*$/);
-      if (numMatch) {
-        resumeData.amount = parseFloat(numMatch[1]);
-      } else {
-        resumeData.description = text.trim();
-      }
-    }
-    return resumeData;
-  }
-  /**
-   * Handle message with agent (fallback)
-   */
-  async handleWithAgent(message, sessionKey, context) {
-    const taskComplexity = this.detectComplexity(message);
-    if (taskComplexity === "high" && (message.imageUrl || message.imageBase64)) {
-      await this.sendResponse(message, { text: "\u{1F4F8} Thanks! Working on it..." });
-      message.replyToken = void 0;
-    }
-    const agentInput = this.formatAgentInput(message, context);
-    const response = await this.callAgent(
-      agentInput,
-      message.source.id,
-      message.channel,
-      context,
-      taskComplexity
-    );
-    console.log(`[${sessionKey}] Agent response: ${response?.substring(0, 200) || "(no response)"}`);
-    if (response) {
-      await this.sendResponse(message, { text: response });
-    }
-  }
-  /**
-   * Send response via the appropriate channel
-   */
-  async sendResponse(originalMessage, response) {
-    const adapter = this.adapters.get(originalMessage.channel);
-    if (!adapter) {
-      console.error(`No adapter for channel: ${originalMessage.channel}`);
-      return;
-    }
-    await adapter.send(
-      originalMessage.source.id,
-      response,
-      originalMessage.replyToken
-    );
-  }
-  /**
-   * Detect task complexity for model routing
-   */
-  detectComplexity(message) {
-    if (message.imageUrl || message.imageBase64) {
-      return "high";
-    }
-    return "simple";
-  }
-  /**
-   * Build context for agent tools
-   */
-  async buildAgentContext(message) {
-    const prefs = await this.getUserPreferences(message.channel, message.sender.id);
-    return {
-      channel: message.channel,
-      senderChannelId: message.sender.id,
-      sourceChannelId: message.source.id,
-      isGroup: message.source.type === "group",
-      senderName: message.sender.name,
-      sourceName: message.source.name,
-      userLanguage: prefs?.language,
-      userTimezone: prefs?.timezone
-    };
-  }
-  /**
-   * Get user preferences (with caching)
-   */
-  async getUserPreferences(channel, userId) {
-    const cacheKey = `${channel}:${userId}`;
-    const cached = this.userPrefsCache.get(cacheKey);
-    if (cached && Date.now() - cached.fetchedAt < this.PREFS_CACHE_TTL_MS) {
-      return cached;
-    }
-    try {
-      const context = {
-        channel,
-        senderChannelId: userId,
-        sourceChannelId: userId
-      };
-      const data = await apiRequest("GET", "/users/me", context);
-      const prefs = {
-        language: data.user?.language === "en" ? "en" : "th",
-        timezone: data.user?.timezone || "Asia/Bangkok",
-        currency: data.user?.currency || "THB",
-        fetchedAt: Date.now()
-      };
-      this.userPrefsCache.set(cacheKey, prefs);
-      console.log(`[Gateway] Loaded user prefs: language=${prefs.language}, currency=${prefs.currency}`);
-      return prefs;
-    } catch (error) {
-      console.log(`[Gateway] User prefs not found (will use defaults)`);
-      return null;
-    }
-  }
-  /**
-   * Invalidate user preferences cache
-   */
-  invalidateUserPrefs(channel, userId) {
-    const cacheKey = `${channel}:${userId}`;
-    this.userPrefsCache.delete(cacheKey);
-  }
-  /**
-   * Format message for agent input
-   */
-  formatAgentInput(message, context) {
-    const contextLines = [
-      `[Context]`,
-      `Channel: ${context.channel}`,
-      `SenderChannelId: ${context.senderChannelId}`,
-      `SourceChannelId: ${context.sourceChannelId}`,
-      `IsGroup: ${context.isGroup}`
-    ];
-    if (context.senderName) {
-      contextLines.push(`SenderName: ${context.senderName}`);
-    }
-    if (context.sourceName) {
-      contextLines.push(`SourceName: ${context.sourceName}`);
-    }
-    if (message.quotedMessage) {
-      contextLines.push(`QuotedMessageId: ${message.quotedMessage.id}`);
-      if (message.quotedMessage.text) {
-        contextLines.push(`QuotedText: ${message.quotedMessage.text}`);
-      }
-    }
-    let messageText = message.text || "";
-    if (message.source.type === "group") {
-      const senderLabel = message.sender.name || message.sender.id;
-      messageText = `[From: ${senderLabel}]
-${messageText}`;
-    }
-    const textContent = `${contextLines.join("\n")}
-
-[Message]
-${messageText}`;
-    if (message.imageBase64 || message.imageUrl) {
-      const imageInstruction = message.imageUrl ? `
-
-[Receipt image attached - ImageURL: ${message.imageUrl}]
-Use process-receipt tool with imageUrl="${message.imageUrl}" to process this receipt and save the expense.` : "\n\n[Receipt image attached - please process and record the expense]";
-      console.log(`[GATEWAY] \u{1F5BC}\uFE0F Including image in multi-modal message`);
-      if (message.imageBase64) {
-        return [
-          { type: "text", text: textContent + imageInstruction },
-          { type: "image", image: message.imageBase64 }
-        ];
-      } else if (message.imageUrl) {
-        return [
-          { type: "text", text: textContent + imageInstruction },
-          { type: "image", image: new URL(message.imageUrl) }
-        ];
-      }
-    }
-    return textContent;
-  }
-  /**
-   * Call the Billog agent
-   */
-  async callAgent(input, sourceId, channel, context, taskComplexity) {
-    if (!this.agent) {
-      throw new Error("Agent not initialized");
-    }
-    const messages = Array.isArray(input) ? [{ role: "user", content: input }] : input;
-    const requestContext = new RequestContext();
-    requestContext.set("userLanguage", context.userLanguage || "th");
-    requestContext.set("userTimezone", context.userTimezone || "Asia/Bangkok");
-    requestContext.set("channel", context.channel);
-    requestContext.set("senderChannelId", context.senderChannelId);
-    requestContext.set("sourceChannelId", context.sourceChannelId);
-    requestContext.set("isGroup", context.isGroup);
-    if (context.senderName) requestContext.set("senderName", context.senderName);
-    if (context.sourceName) requestContext.set("sourceName", context.sourceName);
-    requestContext.set("taskComplexity", taskComplexity);
-    const result = await this.agent.generate(messages, {
-      memory: {
-        thread: sourceId,
-        resource: `${channel}:${sourceId}`
-      },
-      requestContext,
-      toolChoice: "auto",
-      maxSteps: 5
-    });
-    return result.text || null;
-  }
-  // ===========================================
-  // Session Locking
-  // ===========================================
-  async acquireLock(sessionKey) {
-    while (this.sessionLocks.has(sessionKey)) {
-      await this.sessionLocks.get(sessionKey);
-    }
-    let releaseLock;
-    const lockPromise = new Promise((resolve) => {
-      releaseLock = resolve;
-    });
-    lockPromise.__release = releaseLock;
-    this.sessionLocks.set(sessionKey, lockPromise);
-  }
-  releaseLock(sessionKey) {
-    const lock = this.sessionLocks.get(sessionKey);
-    if (lock) {
-      lock.__release?.();
-      this.sessionLocks.delete(sessionKey);
-    }
-  }
-  // ===========================================
-  // Cleanup
-  // ===========================================
-  cleanupExpiredRuns() {
-    const now = Date.now();
-    for (const [key, run] of this.suspendedRuns) {
-      if (now - run.createdAt > this.SUSPENDED_RUN_TTL_MS) {
-        console.log(`[Gateway] Cleaning up expired suspended run: ${key}`);
-        this.suspendedRuns.delete(key);
-      }
-    }
-  }
-  async shutdown() {
-    for (const adapter of this.adapters.values()) {
-      await adapter.shutdown?.();
-    }
-    this.adapters.clear();
-    this.suspendedRuns.clear();
-    console.log("Gateway router shutdown complete");
-  }
+  return `file:${path.join(process.cwd(), "data", "mastra.db")}`;
 }
-function createGateway(config) {
-  return new GatewayRouter(config);
-}
-
-"use strict";
-class WhatsAppAdapter extends EventEmitter {
-  channel = "WHATSAPP";
-  sock = null;
-  sessionPath;
-  messageHandler = null;
-  botJid = null;
-  constructor(config = {}) {
-    super();
-    this.sessionPath = config.sessionPath || "./data/whatsapp";
-  }
-  /**
-   * Set message handler (called when message received)
-   */
-  onMessage(handler) {
-    this.messageHandler = handler;
-  }
-  /**
-   * Initialize WhatsApp connection
-   */
-  async initialize() {
-    let baileys;
-    try {
-      baileys = await import('@whiskeysockets/baileys');
-    } catch {
-      console.log("\u26A0\uFE0F WhatsApp: baileys not installed, skipping WhatsApp adapter");
-      return;
-    }
-    const {
-      makeWASocket,
-      DisconnectReason,
-      useMultiFileAuthState,
-      fetchLatestBaileysVersion
-    } = baileys;
-    const { state, saveCreds } = await useMultiFileAuthState(this.sessionPath);
-    const { version } = await fetchLatestBaileysVersion();
-    this.sock = makeWASocket({
-      version,
-      auth: state,
-      printQRInTerminal: true,
-      // Reduce noise
-      logger: {
-        level: "silent",
-        child: () => ({ level: "silent" }),
-        trace: () => {
-        },
-        debug: () => {
-        },
-        info: () => {
-        },
-        warn: console.warn,
-        error: console.error,
-        fatal: console.error
-      }
-    });
-    this.sock.ev.on("creds.update", saveCreds);
-    this.sock.ev.on("connection.update", (update) => {
-      const { connection, lastDisconnect, qr } = update;
-      if (qr) {
-        console.log("\u{1F4F1} WhatsApp: Scan QR code to connect");
-      }
-      if (connection === "close") {
-        const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-        if (shouldReconnect) {
-          console.log("WhatsApp: Reconnecting...");
-          this.initialize();
-        } else {
-          console.log("WhatsApp: Logged out");
-        }
-      }
-      if (connection === "open") {
-        this.botJid = this.sock?.user?.id || null;
-        console.log(`\u2713 WhatsApp adapter connected: ${this.sock?.user?.name || "Unknown"}`);
-      }
-    });
-    this.sock.ev.on("messages.upsert", async (m) => {
-      for (const msg of m.messages) {
-        if (msg.key.fromMe) continue;
-        const inbound = this.parseMessage(msg);
-        if (inbound && this.messageHandler) {
-          try {
-            await this.messageHandler(inbound);
-          } catch (error) {
-            console.error("WhatsApp message handler error:", error);
-          }
-        }
-      }
-    });
-  }
-  /**
-   * Parse webhook is not used for WhatsApp (uses socket events)
-   */
-  async parseWebhook(_payload) {
-    return [];
-  }
-  /**
-   * Send response via WhatsApp
-   */
-  async send(sourceId, response, _replyToken) {
-    if (!this.sock) {
-      throw new Error("WhatsApp not connected");
-    }
-    if (response.text) {
-      await this.sock.sendMessage(sourceId, { text: response.text });
-    }
-    if (response.imageUrl) {
-      await this.sock.sendMessage(sourceId, {
-        image: { url: response.imageUrl },
-        caption: response.text ? void 0 : "Image"
-        // Only add caption if no text sent
-      });
-    }
-  }
-  /**
-   * Shutdown connection
-   */
-  async shutdown() {
-    if (this.sock) {
-      await this.sock.logout();
-      this.sock = null;
-    }
-  }
-  // ===========================================
-  // Private helpers
-  // ===========================================
-  parseMessage(msg) {
-    const jid = msg.key.remoteJid;
-    if (!jid) return null;
-    const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || msg.message?.imageMessage?.caption;
-    const isGroup = jid.endsWith("@g.us");
-    const sourceType = isGroup ? "group" : "dm";
-    const senderId = isGroup ? msg.key.participant || "unknown" : jid.split("@")[0];
-    const mentions = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
-    const botMentioned = this.botJid ? mentions.includes(this.botJid) : false;
-    return {
-      id: msg.key.id || `wa-${Date.now()}`,
-      channel: "WHATSAPP",
-      text,
-      sender: {
-        id: senderId,
-        name: msg.pushName
-      },
-      source: {
-        id: jid,
-        type: sourceType
-      },
-      mentions: botMentioned ? [this.botJid] : mentions,
-      timestamp: new Date((msg.messageTimestamp || Date.now()) * 1e3)
-    };
-  }
-  /**
-   * Get JID from phone number
-   */
-  formatJid(phoneNumber) {
-    const cleaned = phoneNumber.replace(/\D/g, "");
-    return `${cleaned}@s.whatsapp.net`;
-  }
-  /**
-   * Check if connected
-   */
-  get connected() {
-    return this.sock !== null;
-  }
-}
-
-"use strict";
-
-"use strict";
 const UPLOADS_DIR = process.env.UPLOADS_DIR || "./uploads";
 const BASE_URL = process.env.BASE_URL || "http://localhost:3000";
 const gatewayConfig = {
@@ -5660,13 +6540,16 @@ async function ensureGatewayInitialized(mastra2) {
     gatewayInitialized = true;
   }
 }
+const mastraDbUrl = getMastraDbUrl();
+console.log(`[Mastra] Database URL: ${mastraDbUrl}`);
 const storage = new LibSQLStore({
   id: "billog-mastra",
-  url: process.env.MASTRA_DATABASE_URL || "file:./data/mastra.db"
+  url: mastraDbUrl
 });
 const mastra = new Mastra({
   agents: {
-    billog: billogAgent
+    billog: billogAgent,
+    insights: insightsAgent
   },
   workflows: {
     messageWorkflow
@@ -5674,4 +6557,4 @@ const mastra = new Mastra({
   storage
 });
 
-export { BASE_URL, CATEGORIES, GatewayRouter, OcrResultSchema, ParseResultSchema, ResponseBuilder, TEMPLATES, UPLOADS_DIR, billogAgent, createExpenseTool, createGateway, deleteExpenseTool, detectCategory, dmWorkflow, ensureGatewayInitialized, extractRawTextTool, extractReceiptTool, formatAmount, gateway, gatewayConfig, generateMissingFieldsPrompt, getBalancesTool, getCategoryByNameTool, getExpenseByIdTool, getExpensesTool, getMyBalanceTool, getSpendingSummaryTool, getUserPreferencesTool, groupWorkflow, initSourceTool, listCategoriesTool, mastra, messageWorkflow, ocrReceiptTool, parseExpenseText, parseTextTool, processReceiptTool, processTextExpenseTool, reconcileExpenseTool, recordSettlementTool, responses, setNicknameTool, setUserLanguageTool, shouldUseWorkflow, syncMembersTool, validateParsedExpense };
+export { BASE_URL, CATEGORIES, GatewayRouter, OcrResultSchema, ParseResultSchema, ResponseBuilder, TEMPLATES, UPLOADS_DIR, billogAgent, checkDuplicatePurchaseTool, createExpenseTool, createGateway, deleteExpenseTool, detectCategory, detectItemTypeTool, dmWorkflow, ensureGatewayInitialized, extractRawTextTool, extractReceiptTool, formatAmount, gateway, gatewayConfig, generateMissingFieldsPrompt, getBalancesTool, getCategoryByNameTool, getExpenseByIdTool, getExpensesTool, getMyBalanceTool, getPerishableWindowTool, getSpendingSummaryTool, getUserPreferencesTool, groupWorkflow, initSourceTool, insightsAgent, listCategoriesTool, mastra, messageWorkflow, ocrReceiptTool, parseExpenseText, parseTextTool, processReceiptTool, processTextExpenseTool, reconcileExpenseTool, recordSettlementTool, responses, searchSimilarPurchasesTool, setNicknameTool, setUserLanguageTool, shouldUseWorkflow, syncMembersTool, validateParsedExpense };

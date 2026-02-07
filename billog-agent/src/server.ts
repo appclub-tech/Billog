@@ -1,13 +1,14 @@
 /**
  * Custom Hono Server for Billog Agent
  *
- * Uses @mastra/hono adapter with no /api prefix
- * Routes: /webhook/line, /uploads/*, /health
+ * Runs two servers:
+ * - Port 3000: Custom Hono server (webhooks, uploads)
+ * - Port 4111: Mastra Studio (observability UI)
  */
 
 import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
-import { serveStatic } from '@hono/node-server/serve-static';
+import { MastraServer, type HonoBindings, type HonoVariables } from '@mastra/hono';
 import type { Context } from 'hono';
 import fs from 'fs/promises';
 import path from 'path';
@@ -20,11 +21,12 @@ import {
   UPLOADS_DIR,
 } from './mastra/index.js';
 
+
 // ===========================================
-// Create Hono App
+// Create Hono App with proper typing
 // ===========================================
 
-const app = new Hono();
+const app = new Hono<{ Bindings: HonoBindings; Variables: HonoVariables }>();
 
 // ===========================================
 // Static File Serving for Uploads
@@ -32,10 +34,8 @@ const app = new Hono();
 // ===========================================
 
 app.get('/uploads/*', async (c: Context) => {
-  // Get the path after /uploads/
   const filepath = c.req.path.replace('/uploads/', '');
 
-  // Security: prevent directory traversal
   if (!filepath || filepath.includes('..')) {
     return c.json({ error: 'Invalid path' }, 400);
   }
@@ -44,8 +44,6 @@ app.get('/uploads/*', async (c: Context) => {
 
   try {
     const file = await fs.readFile(fullPath);
-
-    // Determine content type
     const ext = path.extname(filepath).toLowerCase();
     const contentTypes: Record<string, string> = {
       '.png': 'image/png',
@@ -105,7 +103,14 @@ app.get('/health', (c: Context) => {
 });
 
 // ===========================================
-// Start Server
+// Initialize MastraServer (adds Mastra routes)
+// ===========================================
+
+const server = new MastraServer({ app, mastra });
+await server.init();
+
+// ===========================================
+// Start Servers
 // ===========================================
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
@@ -118,12 +123,17 @@ console.log(`
 ║    POST /webhook/line     LINE webhook                ║
 ║    GET  /uploads/*        Static file serving         ║
 ║    GET  /health           Health check                ║
+║  Mastra API:                                          ║
+║    GET  /api/agents       List agents                 ║
+║    POST /api/agents/:id/generate   Call agent         ║
+║    GET  /swagger-ui       API documentation           ║
 ╚═══════════════════════════════════════════════════════╝
 `);
 
 // Ensure uploads directory exists
 await fs.mkdir(UPLOADS_DIR, { recursive: true });
 
+// Start main server
 serve({
   fetch: app.fetch,
   port: PORT,

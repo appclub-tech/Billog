@@ -1,7 +1,9 @@
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
 import { detectCategory, apiRequest, formatAmount } from './5aaadd57-6742-4f80-91d8-d525c91493b6.mjs';
+import { i as isVectorStoreConfigured, a as saveExpenseItemEmbeddings } from '../expense-item-vector.mjs';
 import 'jsonwebtoken';
+import '@upstash/vector';
 
 const ExpenseItemSchema = z.object({
   name: z.string().describe("Item name in English (default language)"),
@@ -119,6 +121,11 @@ ${"=".repeat(60)}`);
         Object.assign(expenseMetadata, input.metadata);
       }
       const expenseDate = input.date || input.metadata?.transactionDate || void 0;
+      const expenseItems = input.items && input.items.length > 0 ? input.items : [{
+        name: input.description,
+        quantity: 1,
+        unitPrice: input.amount
+      }];
       const response = await apiRequest("POST", "/expenses", context, {
         channel,
         senderChannelId,
@@ -132,7 +139,7 @@ ${"=".repeat(60)}`);
         // TODO: implement category name-to-ID resolution
         splitType: input.splitType,
         splits: input.splits,
-        items: input.items,
+        items: expenseItems,
         notes: input.notes,
         metadata: Object.keys(expenseMetadata).length > 0 ? expenseMetadata : void 0,
         // Receipt data from OCR - creates Receipt record after expense
@@ -146,6 +153,25 @@ ${"=".repeat(60)}`);
         };
       }
       console.log(`[TOOL] \u2705 create-expense SUCCESS: EX:${response.expense.id}`);
+      if (isVectorStoreConfigured()) {
+        const vectorDate = response.expense.date || (/* @__PURE__ */ new Date()).toISOString();
+        const paidBy = senderChannelId;
+        saveExpenseItemEmbeddings(
+          response.expense.id,
+          expenseItems.map((item) => ({
+            name: item.name,
+            nameLocalized: item.nameLocalized,
+            quantity: item.quantity || 1,
+            unit: void 0,
+            // Not in current schema
+            unitPrice: item.unitPrice,
+            totalPrice: (item.quantity || 1) * item.unitPrice
+          })),
+          sourceChannelId,
+          vectorDate,
+          paidBy
+        ).catch((err) => console.error("[Vector] Embedding save error:", err));
+      }
       const formattedAmount = formatAmount(response.expense.amount, response.expense.currency);
       let message = `${response.expense.description} | ${formattedAmount}`;
       message += `

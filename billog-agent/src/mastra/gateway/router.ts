@@ -25,7 +25,6 @@ import { makeSessionKey, shouldActivate } from './types.js';
 import { LineAdapter } from './adapters/line.js';
 import { apiRequest, type ApiContext } from '../tools/api-client.js';
 import {
-  shouldUseWorkflow,
   type MessageInput,
   type MessageOutput,
 } from '../workflows/index.js';
@@ -69,6 +68,7 @@ export class GatewayRouter {
   private config: GatewayConfig;
   private mastra: Mastra | null = null;
   private agent: Agent | null = null;
+  private insightsAgent: Agent | null = null;
   private workflow: Workflow<any, any, any> | null = null;
 
   // Simple in-memory lock per session (prevent concurrent runs)
@@ -96,6 +96,14 @@ export class GatewayRouter {
     this.agent = mastra.getAgent('billog');
     if (!this.agent) {
       throw new Error('Billog agent not found in Mastra instance');
+    }
+
+    // Get the insights agent (optional - for parallel execution)
+    this.insightsAgent = mastra.getAgent('insights');
+    if (this.insightsAgent) {
+      console.log('✓ Insights agent registered (parallel mode enabled)');
+    } else {
+      console.log('⚠ Insights agent not found - running in single-agent mode');
     }
 
     // Get the message workflow
@@ -157,20 +165,11 @@ export class GatewayRouter {
    * Handle incoming message from any channel
    */
   async handleMessage(message: InboundMessage): Promise<void> {
-    // Log full inbound message for debugging
-    console.log(`\n${'='.repeat(60)}`);
-    console.log(`[GATEWAY] 📥 INBOUND MESSAGE`);
-    console.log(`${'='.repeat(60)}`);
-    console.log(`  Channel:    ${message.channel}`);
-    console.log(`  Source ID:  ${message.source.id}`);
-    console.log(`  Source:     ${message.source.type} - ${message.source.name || 'N/A'}`);
-    console.log(`  Sender ID:  ${message.sender.id}`);
-    console.log(`  Sender:     ${message.sender.name || 'N/A'}`);
-    console.log(`  Text:       ${message.text?.substring(0, 100) || '(no text)'}`);
-    if (message.imageUrl) {
-      console.log(`  Image URL:  ${message.imageUrl}`);
-    }
-    console.log(`${'='.repeat(60)}\n`);
+    // Compact inbound message log
+    const sender = message.sender.name || message.sender.id.substring(0, 8);
+    const source = message.source.name || message.source.id.substring(0, 8);
+    const text = message.text?.substring(0, 50) || (message.imageUrl ? '📷 image' : '(empty)');
+    console.log(`[${message.channel}] 📥 ${sender}@${source}: ${text}`);
 
     // Check activation for groups
     const activationMode = this.config.groupActivation?.mode || 'mention';
@@ -205,18 +204,12 @@ export class GatewayRouter {
         return;
       }
 
-      // Determine routing: workflow or agent
-      const useWorkflow = this.workflow && shouldUseWorkflow({
-        text: message.text,
-        imageUrl: message.imageUrl,
-        imageBase64: message.imageBase64,
-      });
-
-      if (useWorkflow) {
+      // Always use workflow - it handles fallback internally
+      if (this.workflow) {
         console.log(`[${sessionKey}] 🔄 Using WORKFLOW`);
         await this.handleWithWorkflow(message, sessionKey, context);
       } else {
-        console.log(`[${sessionKey}] 🤖 Using AGENT (fallback)`);
+        console.log(`[${sessionKey}] 🤖 Using AGENT (no workflow)`);
         await this.handleWithAgent(message, sessionKey, context);
       }
     } catch (error) {
@@ -241,15 +234,6 @@ export class GatewayRouter {
   ): Promise<void> {
     if (!this.workflow) {
       throw new Error('Workflow not initialized');
-    }
-
-    // Send acknowledgment for receipt processing (takes time)
-    if (message.imageUrl || message.imageBase64) {
-      const ackMessage = context.userLanguage === 'en'
-        ? '📸 Got it! Processing...'
-        : '📸 ได้รับแล้ว! กำลังประมวลผล...';
-      await this.sendResponse(message, { text: ackMessage });
-      message.replyToken = undefined; // Clear for push API
     }
 
     // Build workflow input
@@ -327,9 +311,47 @@ export class GatewayRouter {
     console.log(`[${sessionKey}] Workflow result: status=${result.status}`);
 
     if (result.status === 'success') {
-      const output = result.result as MessageOutput;
+      const rawOutput = result.result as Record<string, unknown> | undefined;
+
+      // Debug log (compact)
+      const outputKeys = rawOutput ? Object.keys(rawOutput).join(',') : 'empty';
+      console.log(`[${sessionKey}] Workflow output keys: ${outputKeys}`);
+
+      // Extract message from nested workflow output structure
+      // Output can be: { message: "..." } or { "dm-workflow": { "step-id": { message: "..." } } }
+      const output = this.extractWorkflowOutput(rawOutput);
+
+      // If no message in output, fallback to agent
+      if (!output?.message) {
+        console.log(`[${sessionKey}] ⚠️ No message in workflow output, falling back to agent`);
+        await this.handleWithAgent(message, sessionKey, context);
+        return;
+      }
+
+      // Check if this is a fallback status (workflow can't handle this message type)
+      if (output.status === 'fallback') {
+        console.log(`[${sessionKey}] 🔄 Workflow returned fallback: ${output.fallbackReason}`);
+        await this.handleWithAgent(message, sessionKey, context);
+        return;
+      }
+
       console.log(`[${sessionKey}] ✅ Workflow success: ${output.message.substring(0, 100)}`);
       await this.sendResponse(message, { text: output.message });
+      message.replyToken = undefined; // Clear for subsequent push messages
+
+      // Run insights agent in parallel for expense messages
+      if (this.insightsAgent && output.expenseId) {
+        console.log(`[${sessionKey}] 💡 Running Insights for expense`);
+        try {
+          const insightsResponse = await this.callInsightsAgent(message, context);
+          if (insightsResponse && insightsResponse.trim() !== 'SILENT') {
+            console.log(`[${sessionKey}] 💡 Insights: ${insightsResponse.substring(0, 100)}`);
+            await this.sendResponse(message, { text: insightsResponse });
+          }
+        } catch (error) {
+          console.error(`[${sessionKey}] Insights error (non-fatal):`, error);
+        }
+      }
     } else if (result.status === 'suspended') {
       // Store suspended run for resume
       const suspendPayload = result.suspendPayload as {
@@ -379,6 +401,37 @@ export class GatewayRouter {
   }
 
   /**
+   * Extract MessageOutput from nested workflow result
+   * Workflow results can be nested like: { "dm-workflow": { "step-id": { message: "..." } } }
+   */
+  private extractWorkflowOutput(rawOutput: Record<string, unknown> | undefined): MessageOutput | undefined {
+    if (!rawOutput) return undefined;
+
+    // If output has message directly, return it
+    if (typeof rawOutput.message === 'string') {
+      return rawOutput as unknown as MessageOutput;
+    }
+
+    // Otherwise, traverse nested structure to find the deepest object with 'message'
+    const findMessage = (obj: Record<string, unknown>): MessageOutput | undefined => {
+      for (const value of Object.values(obj)) {
+        if (value && typeof value === 'object') {
+          const nested = value as Record<string, unknown>;
+          if (typeof nested.message === 'string') {
+            return nested as unknown as MessageOutput;
+          }
+          // Recurse deeper
+          const found = findMessage(nested);
+          if (found) return found;
+        }
+      }
+      return undefined;
+    };
+
+    return findMessage(rawOutput);
+  }
+
+  /**
    * Parse user's reply to extract resume data
    */
   private parseResumeData(
@@ -415,37 +468,116 @@ export class GatewayRouter {
 
   /**
    * Handle message with agent (fallback)
+   * Runs both Bookkeeper and Insights agents in parallel when appropriate
    */
   private async handleWithAgent(
     message: InboundMessage,
     sessionKey: string,
     context: AgentContext
   ): Promise<void> {
-    // Detect task complexity for model routing
     const taskComplexity = this.detectComplexity(message);
-
-    // Send acknowledgment for high-complexity tasks
-    if (taskComplexity === 'high' && (message.imageUrl || message.imageBase64)) {
-      await this.sendResponse(message, { text: '📸 Thanks! Working on it...' });
-      message.replyToken = undefined;
-    }
-
-    // Format message for agent
     const agentInput = this.formatAgentInput(message, context);
 
-    // Call agent
-    const response = await this.callAgent(
-      agentInput,
-      message.source.id,
-      message.channel,
-      context,
-      taskComplexity
-    );
+    // Always run both agents in parallel - each decides whether to respond
+    // Insights Agent will return "SILENT" if it has nothing useful to say
+    if (this.insightsAgent) {
+      console.log(`[${sessionKey}] 🔀 Running PARALLEL agents (Bookkeeper + Insights)`);
 
-    console.log(`[${sessionKey}] Agent response: ${response?.substring(0, 200) || '(no response)'}`);
+      const [bookkeeperResult, insightsResult] = await Promise.allSettled([
+        this.callAgent(agentInput, message.source.id, message.channel, context, taskComplexity),
+        this.callInsightsAgent(message, context),
+      ]);
 
-    if (response) {
-      await this.sendResponse(message, { text: response });
+      // Send Bookkeeper response first (if any)
+      if (bookkeeperResult.status === 'fulfilled' && bookkeeperResult.value) {
+        console.log(`[${sessionKey}] 🤖 Bookkeeper: ${bookkeeperResult.value.substring(0, 100)}`);
+        await this.sendResponse(message, { text: bookkeeperResult.value });
+        message.replyToken = undefined; // Clear for subsequent push messages
+      } else if (bookkeeperResult.status === 'rejected') {
+        console.error(`[${sessionKey}] ❌ Bookkeeper error:`, bookkeeperResult.reason);
+      }
+
+      // Send Insights response if it has something useful (not "SILENT")
+      if (insightsResult.status === 'fulfilled' && insightsResult.value) {
+        const insightsResponse = insightsResult.value.trim();
+        if (insightsResponse && !insightsResponse.toUpperCase().includes('SILENT')) {
+          console.log(`[${sessionKey}] 💡 Insights: ${insightsResponse.substring(0, 100)}`);
+          await this.sendResponse(message, { text: insightsResponse });
+        } else {
+          console.log(`[${sessionKey}] 💡 Insights: (silent)`);
+        }
+      } else if (insightsResult.status === 'rejected') {
+        console.error(`[${sessionKey}] ❌ Insights error:`, insightsResult.reason);
+      }
+    } else {
+      // Insights Agent not configured - run Bookkeeper only
+      console.log(`[${sessionKey}] 🤖 Running SINGLE agent (Bookkeeper only)`);
+
+      const response = await this.callAgent(
+        agentInput,
+        message.source.id,
+        message.channel,
+        context,
+        taskComplexity
+      );
+
+      if (response) {
+        console.log(`[${sessionKey}] 🤖 Bookkeeper: ${response.substring(0, 100)}`);
+        await this.sendResponse(message, { text: response });
+      }
+    }
+  }
+
+  /**
+   * Call Insights Agent
+   * Let the agent decide whether to respond or stay silent
+   */
+  private async callInsightsAgent(
+    message: InboundMessage,
+    context: AgentContext
+  ): Promise<string | null> {
+    if (!this.insightsAgent) {
+      return null;
+    }
+
+    // Simple context - let the agent understand the message naturally
+    const contextLines: string[] = [
+      `[Context]`,
+      `Channel: ${context.channel}`,
+      `SourceChannelId: ${context.sourceChannelId}`,
+      `IsGroup: ${context.isGroup}`,
+    ];
+
+    const messageText = message.text || '';
+    const content = `${contextLines.join('\n')}\n\n[Message]\n${messageText}`;
+
+    const requestContext = new RequestContext<{
+      userLanguage: 'th' | 'en';
+      userTimezone: string;
+      channel: Channel;
+      senderChannelId: string;
+      sourceChannelId: string;
+      isGroup: boolean;
+    }>();
+
+    requestContext.set('userLanguage', context.userLanguage || 'th');
+    requestContext.set('userTimezone', context.userTimezone || 'Asia/Bangkok');
+    requestContext.set('channel', context.channel);
+    requestContext.set('senderChannelId', context.senderChannelId);
+    requestContext.set('sourceChannelId', context.sourceChannelId);
+    requestContext.set('isGroup', context.isGroup);
+
+    try {
+      const result = await this.insightsAgent.generate(content, {
+        requestContext,
+        toolChoice: 'auto',
+        maxSteps: 3,
+      });
+
+      return result.text || null;
+    } catch (error) {
+      console.error(`[Insights] Agent error:`, error);
+      return null;
     }
   }
 
@@ -583,26 +715,12 @@ export class GatewayRouter {
     }
 
     const textContent = `${contextLines.join('\n')}\n\n[Message]\n${messageText}`;
-
-    if (message.imageBase64 || message.imageUrl) {
-      const imageInstruction = message.imageUrl
-        ? `\n\n[Receipt image attached - ImageURL: ${message.imageUrl}]\nUse process-receipt tool with imageUrl="${message.imageUrl}" to process this receipt and save the expense.`
-        : '\n\n[Receipt image attached - please process and record the expense]';
-
-      console.log(`[GATEWAY] 🖼️ Including image in multi-modal message`);
-
-      if (message.imageBase64) {
-        return [
-          { type: 'text', text: textContent + imageInstruction },
-          { type: 'image', image: message.imageBase64 },
-        ];
-      } else if (message.imageUrl) {
-        return [
-          { type: 'text', text: textContent + imageInstruction },
-          { type: 'image', image: new URL(message.imageUrl) },
-        ];
-      }
+ 
+    if (message.imageUrl) {
+      console.log(`[GATEWAY] 🧾 Receipt: ${message.imageUrl}`);
+      return textContent + `\n\n[Receipt Image]\nImageURL: ${message.imageUrl}`;
     }
+  
 
     return textContent;
   }

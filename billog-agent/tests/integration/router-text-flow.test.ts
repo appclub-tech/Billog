@@ -146,6 +146,12 @@ describe('Router Text Flow', () => {
       expect(expense.description.toLowerCase()).toContain('coffee');
       expect(expense.amount).toBe(65);
       expect(expense.currency).toBe('THB');
+
+      // Verify items are always created (even for single-item text expenses)
+      expect(expense.items).toBeDefined();
+      expect(expense.items!.length).toBeGreaterThan(0);
+      expect(expense.items![0].name.toLowerCase()).toContain('coffee');
+      expect(expense.items![0].unitPrice).toBe(65);
     }, 60000);
 
     it('creates expense with category detection: "grab home 120"', async () => {
@@ -162,6 +168,10 @@ describe('Router Text Flow', () => {
 
       const { expense } = await getTestExpenseById(expenseId!);
       expect(expense.amount).toBe(120);
+
+      // Verify items are always created
+      expect(expense.items).toBeDefined();
+      expect(expense.items!.length).toBeGreaterThan(0);
     }, 60000);
 
     it('handles Thai input: "กาแฟ 45"', async () => {
@@ -177,6 +187,10 @@ describe('Router Text Flow', () => {
         createdExpenseIds.push(expenseId);
         const { expense } = await getTestExpenseById(expenseId);
         expect(expense.amount).toBe(45);
+
+        // Verify items are always created (even for Thai text expenses)
+        expect(expense.items).toBeDefined();
+        expect(expense.items!.length).toBeGreaterThan(0);
       }
     }, 60000);
 

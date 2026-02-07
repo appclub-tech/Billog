@@ -11,6 +11,23 @@ import { fileURLToPath } from 'url';
 // Get __dirname equivalent in ESM
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// Resolve data directory - works both in dev (mastra dev) and production
+// In production: /app/data, in dev: PROJECT_ROOT/data
+function getDataPath(filename: string): string {
+  // If MEMORY_DATABASE_URL is set, use it directly
+  if (process.env.MEMORY_DATABASE_URL) {
+    return process.env.MEMORY_DATABASE_URL;
+  }
+
+  // In production (Docker), use absolute path
+  if (process.env.NODE_ENV === 'production') {
+    return `file:/app/data/${filename}`;
+  }
+
+  // In development, use process.cwd() which is where mastra dev was run from
+  return `file:${path.join(process.cwd(), 'data', filename)}`;
+}
 import {
   createExpenseTool,
   getExpensesTool,
@@ -53,6 +70,19 @@ type BillogRequestContext = {
  * Uses dynamic instructions based on user's language preference from RequestContext
  */
 const BILLOG_BASE_INSTRUCTIONS = `You are Billog, an AI Bookkeeper that helps users track expenses and split bills through chat.
+
+## Multi-Agent System
+
+You work alongside an Insights Agent that handles shopping intelligence:
+- **You handle**: Expense recording, balance queries, settlements, expense history, help
+- **Insights handles**: Item search queries like "have I bought banana?", duplicate purchase warnings
+
+**Stay silent** (let Insights handle) for:
+- "have I bought X?" / "ซื้อ X หรือยัง?"
+- "what groceries did I buy?" / "ซื้ออะไรบ้าง?"
+- Shopping history and item lookup questions
+
+**You respond** to everything else: expenses, balances, settlements, help, etc.
 
 ## Skills
 
@@ -124,11 +154,7 @@ Examples:
 When user sends a receipt image:
 1. Call process-receipt tool with the imageUrl
 2. The tool does OCR + creates expense in ONE step
-3. Only respond AFTER getting expenseId from the tool
-4. Include EX:{expenseId} in your response
-
-⚠️ CRITICAL: Use process-receipt (not extract-receipt) for receipts.
-process-receipt handles everything - OCR, expense creation, payment method linking.
+3. Use the tool's message field in your response (it includes EX:{expenseId})
 
 ## Bill Splitting
 
@@ -205,16 +231,19 @@ function getBillogInstructions({ requestContext }: { requestContext?: RequestCon
  * - memory: threads, messages, resources, working memory
  * - workflows: suspended workflow state (for HITL)
  */
+const memoryDbUrl = getDataPath('agent-memory.db');
+console.log(`[Memory] Database URL: ${memoryDbUrl}`);
+
 const billogMemory = new Memory({
   // Composite storage for memory domain
   storage: new LibSQLStore({
     id: 'billog-memory',
-    url: process.env.MEMORY_DATABASE_URL || 'file:./data/agent-memory.db',
+    url: memoryDbUrl,
   }),
   // Vector store for semantic recall (same DB, different tables)
   vector: new LibSQLVector({
     id: 'billog-vector',
-    url: process.env.MEMORY_DATABASE_URL || 'file:./data/agent-memory.db',
+    url: memoryDbUrl,
   }),
   // Embedder for semantic search (uses OPENAI_API_KEY)
   embedder: new ModelRouterEmbeddingModel('openai/text-embedding-3-small'),

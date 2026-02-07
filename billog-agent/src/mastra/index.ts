@@ -1,8 +1,22 @@
 import { Mastra } from '@mastra/core';
 import { LibSQLStore } from '@mastra/libsql';
+import path from 'path';
 import { billogAgent } from './agents/billog.agent.js';
+import { insightsAgent } from './agents/insights.agent.js';
 import { createGateway, type GatewayConfig } from './gateway/index.js';
 import { messageWorkflow } from './workflows/index.js';
+
+// Resolve data directory path
+function getMastraDbUrl(): string {
+  if (process.env.MASTRA_DATABASE_URL) {
+    return process.env.MASTRA_DATABASE_URL;
+  }
+  if (process.env.NODE_ENV === 'production') {
+    return 'file:/app/data/mastra.db';
+  }
+  // In development, use process.cwd() which is where mastra dev was run from
+  return `file:${path.join(process.cwd(), 'data', 'mastra.db')}`;
+}
 
 // ===========================================
 // Configuration
@@ -68,9 +82,12 @@ export async function ensureGatewayInitialized(mastra: Mastra): Promise<void> {
  *
  * Note: Agent memory uses separate storage (see billog.agent.ts)
  */
+const mastraDbUrl = getMastraDbUrl();
+console.log(`[Mastra] Database URL: ${mastraDbUrl}`);
+
 const storage = new LibSQLStore({
   id: 'billog-mastra',
-  url: process.env.MASTRA_DATABASE_URL || 'file:./data/mastra.db',
+  url: mastraDbUrl,
 });
 
 // ===========================================
@@ -80,6 +97,7 @@ const storage = new LibSQLStore({
 export const mastra = new Mastra({
   agents: {
     billog: billogAgent,
+    insights: insightsAgent,
   },
   workflows: {
     messageWorkflow,
@@ -91,7 +109,7 @@ export const mastra = new Mastra({
 // Exports
 // ===========================================
 
-export { billogAgent };
+export { billogAgent, insightsAgent };
 export { UPLOADS_DIR, BASE_URL };
 export * from './tools/index.js';
 export { createGateway, GatewayRouter } from './gateway/index.js';

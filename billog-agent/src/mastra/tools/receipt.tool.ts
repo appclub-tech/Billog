@@ -9,28 +9,19 @@ import { createTool } from '@mastra/core/tools';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { z } from 'zod';
 import { apiRequest, CATEGORIES, formatAmount, type ApiContext, type CategoryName } from './api-client.js';
+import { saveExpenseItemEmbeddings, isVectorStoreConfigured } from '../vector/index.js';
 
 // Initialize Gemini
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY || '');
 
 // ============================================
-// OCR Prompts (same as ocr.tool.ts)
+// Single OCR Prompt - extract and analyze in one call
 // ============================================
-
-const EXTRACT_TEXT_PROMPT = `Extract ALL text from this image exactly as shown.
-Include every word, number, and symbol visible.
-Return ONLY the raw text, no formatting or explanation.`;
 
 const categoryList = Object.keys(CATEGORIES).join('|');
 
-const ANALYZE_TEXT_PROMPT = `Analyze this receipt text and extract structured data as JSON.
+const OCR_PROMPT = `Extract and analyze this receipt image. Return JSON only.
 
-Receipt text:
----
-{TEXT}
----
-
-Return JSON:
 {
   "isReceipt": true/false,
   "storeName": "store name in English",
@@ -212,24 +203,18 @@ Use this when user sends a receipt image. Do NOT use extract-receipt separately.
 
     try {
       // ==========================================
-      // STEP 1: OCR - Extract receipt data
+      // STEP 1: OCR - Extract and analyze in one call
       // ==========================================
       console.log('[Receipt] Step 1: OCR extraction...');
 
       const image = await downloadImage(input.imageUrl);
 
-      // Extract raw text
-      console.log('[Receipt] Extracting text...');
-      const rawText = await callGemini('gemini-2.0-flash', [
-        EXTRACT_TEXT_PROMPT,
+      // Single OCR call - extract and analyze together
+      console.log('[Receipt] Processing receipt...');
+      const analysisText = await callGemini('gemini-2.0-flash', [
+        OCR_PROMPT,
         { inlineData: { data: image.data, mimeType: image.mimeType } },
       ]);
-      console.log(`[Receipt] Extracted ${rawText.length} chars`);
-
-      // Analyze text
-      console.log('[Receipt] Analyzing text...');
-      const analyzePrompt = ANALYZE_TEXT_PROMPT.replace('{TEXT}', rawText);
-      const analysisText = await callGemini('gemini-2.0-flash', [analyzePrompt]);
       const ocrResult = parseJSON(analysisText);
 
       console.log(`[Receipt] isReceipt: ${ocrResult.isReceipt}, items: ${(ocrResult.items as unknown[])?.length || 0}`);
@@ -267,6 +252,23 @@ Use this when user sends a receipt image. Do NOT use extract-receipt separately.
       // Use date from receipt if available
       const expenseDate = (metadata?.transactionDate as string) || undefined;
 
+      // Ensure we always have items (even if OCR didn't extract line items)
+      const expenseItems = items.length > 0
+        ? items.map(item => ({
+            name: (item.name as string) || 'Unknown',
+            nameLocalized: (item.nameLocalized as string) || null,
+            quantity: (item.quantity as number) || 1,
+            unitPrice: (item.unitPrice as number) || 0,
+            ingredientType: (item.ingredientType as string) || null,
+          }))
+        : [{
+            name: storeName,
+            nameLocalized: null,
+            quantity: 1,
+            unitPrice: total,
+            ingredientType: null,
+          }];
+
       // Call API to create expense
       const response = await apiRequest<{
         expense: { id: string; description: string; amount: number; currency: string; date: string };
@@ -282,13 +284,7 @@ Use this when user sends a receipt image. Do NOT use extract-receipt separately.
         date: expenseDate,
         splitType: input.splitType,
         splits: input.splits,
-        items: items.map(item => ({
-          name: (item.name as string) || 'Unknown',
-          nameLocalized: (item.nameLocalized as string) || null,
-          quantity: (item.quantity as number) || 1,
-          unitPrice: (item.unitPrice as number) || 0,
-          ingredientType: (item.ingredientType as string) || null,
-        })),
+        items: expenseItems,
         notes: input.notes,
         metadata: Object.keys(expenseMetadata).length > 0 ? expenseMetadata : undefined,
         // Receipt data for creating Receipt record
@@ -318,6 +314,26 @@ Use this when user sends a receipt image. Do NOT use extract-receipt separately.
       }
 
       console.log(`[Receipt] ✅ SUCCESS: EX:${response.expense.id}`);
+
+      // Save embeddings for Insights Agent (non-blocking)
+      if (isVectorStoreConfigured()) {
+        const embeddingDate = response.expense.date || new Date().toISOString();
+
+        // Always save items (we ensured expenseItems exists above)
+        saveExpenseItemEmbeddings(
+          response.expense.id,
+          expenseItems.map((item) => ({
+            name: item.name || 'Unknown',
+            nameLocalized: item.nameLocalized || undefined,
+            quantity: item.quantity || 1,
+            unitPrice: item.unitPrice || 0,
+            totalPrice: (item.quantity || 1) * (item.unitPrice || 0),
+          })),
+          sourceChannelId,
+          embeddingDate,
+          senderChannelId // Who paid
+        ).catch((err) => console.error('[Vector] Embedding save error:', err));
+      }
 
       // ==========================================
       // STEP 3: Format response

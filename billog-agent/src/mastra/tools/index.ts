@@ -77,6 +77,14 @@ export {
   setUserLanguageTool,
 } from './user.tool.js';
 
+// Insights tools (for Insights Agent)
+export {
+  searchSimilarPurchasesTool,
+  getPerishableWindowTool,
+  detectItemTypeTool,
+  checkDuplicatePurchaseTool,
+} from './insights.tool.js';
+
 // Re-export utilities
 export { CATEGORIES, detectCategory, formatAmount } from './api-client.js';
 

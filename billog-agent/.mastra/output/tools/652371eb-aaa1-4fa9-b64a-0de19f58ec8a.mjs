@@ -2,21 +2,14 @@ import { createTool } from '@mastra/core/tools';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { z } from 'zod';
 import { CATEGORIES, apiRequest, formatAmount } from './5aaadd57-6742-4f80-91d8-d525c91493b6.mjs';
+import { i as isVectorStoreConfigured, a as saveExpenseItemEmbeddings } from '../expense-item-vector.mjs';
 import 'jsonwebtoken';
+import '@upstash/vector';
 
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY || "");
-const EXTRACT_TEXT_PROMPT = `Extract ALL text from this image exactly as shown.
-Include every word, number, and symbol visible.
-Return ONLY the raw text, no formatting or explanation.`;
 const categoryList = Object.keys(CATEGORIES).join("|");
-const ANALYZE_TEXT_PROMPT = `Analyze this receipt text and extract structured data as JSON.
+const OCR_PROMPT = `Extract and analyze this receipt image. Return JSON only.
 
-Receipt text:
----
-{TEXT}
----
-
-Return JSON:
 {
   "isReceipt": true/false,
   "storeName": "store name in English",
@@ -171,15 +164,11 @@ ${"=".repeat(60)}`);
     try {
       console.log("[Receipt] Step 1: OCR extraction...");
       const image = await downloadImage(input.imageUrl);
-      console.log("[Receipt] Extracting text...");
-      const rawText = await callGemini("gemini-2.0-flash", [
-        EXTRACT_TEXT_PROMPT,
+      console.log("[Receipt] Processing receipt...");
+      const analysisText = await callGemini("gemini-2.0-flash", [
+        OCR_PROMPT,
         { inlineData: { data: image.data, mimeType: image.mimeType } }
       ]);
-      console.log(`[Receipt] Extracted ${rawText.length} chars`);
-      console.log("[Receipt] Analyzing text...");
-      const analyzePrompt = ANALYZE_TEXT_PROMPT.replace("{TEXT}", rawText);
-      const analysisText = await callGemini("gemini-2.0-flash", [analyzePrompt]);
       const ocrResult = parseJSON(analysisText);
       console.log(`[Receipt] isReceipt: ${ocrResult.isReceipt}, items: ${ocrResult.items?.length || 0}`);
       if (!ocrResult.isReceipt) {
@@ -205,6 +194,19 @@ ${"=".repeat(60)}`);
         Object.assign(expenseMetadata, metadata);
       }
       const expenseDate = metadata?.transactionDate || void 0;
+      const expenseItems = items.length > 0 ? items.map((item) => ({
+        name: item.name || "Unknown",
+        nameLocalized: item.nameLocalized || null,
+        quantity: item.quantity || 1,
+        unitPrice: item.unitPrice || 0,
+        ingredientType: item.ingredientType || null
+      })) : [{
+        name: storeName,
+        nameLocalized: null,
+        quantity: 1,
+        unitPrice: total,
+        ingredientType: null
+      }];
       const response = await apiRequest("POST", "/expenses", context, {
         channel,
         senderChannelId,
@@ -216,13 +218,7 @@ ${"=".repeat(60)}`);
         date: expenseDate,
         splitType: input.splitType,
         splits: input.splits,
-        items: items.map((item) => ({
-          name: item.name || "Unknown",
-          nameLocalized: item.nameLocalized || null,
-          quantity: item.quantity || 1,
-          unitPrice: item.unitPrice || 0,
-          ingredientType: item.ingredientType || null
-        })),
+        items: expenseItems,
         notes: input.notes,
         metadata: Object.keys(expenseMetadata).length > 0 ? expenseMetadata : void 0,
         // Receipt data for creating Receipt record
@@ -249,6 +245,23 @@ ${"=".repeat(60)}`);
         };
       }
       console.log(`[Receipt] \u2705 SUCCESS: EX:${response.expense.id}`);
+      if (isVectorStoreConfigured()) {
+        const embeddingDate = response.expense.date || (/* @__PURE__ */ new Date()).toISOString();
+        saveExpenseItemEmbeddings(
+          response.expense.id,
+          expenseItems.map((item) => ({
+            name: item.name || "Unknown",
+            nameLocalized: item.nameLocalized || void 0,
+            quantity: item.quantity || 1,
+            unitPrice: item.unitPrice || 0,
+            totalPrice: (item.quantity || 1) * (item.unitPrice || 0)
+          })),
+          sourceChannelId,
+          embeddingDate,
+          senderChannelId
+          // Who paid
+        ).catch((err) => console.error("[Vector] Embedding save error:", err));
+      }
       const formattedAmount = formatAmount(response.expense.amount, response.expense.currency);
       let message = `${storeName} | ${formattedAmount}`;
       message += `

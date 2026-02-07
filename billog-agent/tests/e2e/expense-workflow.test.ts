@@ -124,6 +124,12 @@ describe('Expense Workflow E2E', () => {
       expect(expense.description.toLowerCase()).toContain('coffee');
       expect(expense.amount).toBe(65);
       expect(expense.currency).toBe('THB');
+
+      // Verify items are always created (even for single-item text expenses)
+      expect(expense.items).toBeDefined();
+      expect(expense.items!.length).toBeGreaterThan(0);
+      expect(expense.items![0].name.toLowerCase()).toContain('coffee');
+      expect(expense.items![0].unitPrice).toBe(65);
     });
 
     it('records expense with bill split (@all)', async () => {

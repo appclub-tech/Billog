@@ -13,6 +13,7 @@
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
 import { apiRequest, detectCategory, formatAmount, type ApiContext } from './api-client.js';
+import { saveExpenseItemEmbeddings, isVectorStoreConfigured } from '../vector/index.js';
 
 // ============================================
 // Text Parsing Logic
@@ -203,6 +204,13 @@ Returns: expenseId confirming the record was saved, or error with missing fields
       sourceType: isGroup ? 'GROUP' : 'DM',
     };
 
+    // Build expense item (even single items should be ExpenseItems)
+    const expenseItem = {
+      name: parsed.description!,
+      quantity: 1,
+      unitPrice: parsed.amount!,
+    };
+
     try {
       const response = await apiRequest<{
         expense: { id: string; description: string; amount: number; currency: string; date: string };
@@ -218,6 +226,8 @@ Returns: expenseId confirming the record was saved, or error with missing fields
         date: parsed.date,
         splitType: parsed.splitType,
         splits: parsed.splitTargets.map(target => ({ target })),
+        // Always include items - even single item purchases
+        items: [expenseItem],
       });
 
       // Verify expense was created
@@ -230,6 +240,18 @@ Returns: expenseId confirming the record was saved, or error with missing fields
       }
 
       console.log(`[TextExpense] ✅ SUCCESS: EX:${response.expense.id}`);
+
+      // Save embedding for Insights Agent (non-blocking)
+      if (isVectorStoreConfigured()) {
+        const expenseDate = response.expense.date || new Date().toISOString();
+        saveExpenseItemEmbeddings(
+          response.expense.id,
+          [expenseItem],
+          sourceChannelId,
+          expenseDate,
+          senderChannelId // Who paid
+        ).catch((err) => console.error('[Vector] Embedding save error:', err));
+      }
 
       // Format success message
       const formattedAmount = formatAmount(response.expense.amount, response.expense.currency);

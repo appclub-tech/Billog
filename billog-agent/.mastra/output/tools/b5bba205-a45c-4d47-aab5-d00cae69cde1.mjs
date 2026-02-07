@@ -10,9 +10,12 @@ export { processTextExpenseTool } from './532da063-6b34-4743-86b3-316e3c078afd.m
 export { OcrResultSchema, ocrReceiptTool } from './4896d1fe-3397-4c1e-922c-4710379ded47.mjs';
 export { ParseResultSchema, generateMissingFieldsPrompt, parseExpenseText, parseTextTool, validateParsedExpense } from './285fa223-6376-40b1-a3e9-6d273fe28d8a.mjs';
 export { getUserPreferencesTool, setUserLanguageTool } from './551953aa-fe59-42d8-9606-409be897ed5f.mjs';
+export { c as checkDuplicatePurchaseTool, d as detectItemTypeTool, g as getPerishableWindowTool, s as searchSimilarPurchasesTool } from '../insights.tool.mjs';
 export { CATEGORIES, detectCategory, formatAmount } from './5aaadd57-6742-4f80-91d8-d525c91493b6.mjs';
 export { ResponseBuilder, TEMPLATES, responses } from './556c577f-7fee-4d7c-ae3c-e2c0566f189a.mjs';
 import '@mastra/core/tools';
 import 'zod';
+import '../expense-item-vector.mjs';
+import '@upstash/vector';
 import '@google/generative-ai';
 import 'jsonwebtoken';

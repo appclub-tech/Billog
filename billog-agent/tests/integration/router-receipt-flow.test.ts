@@ -26,7 +26,7 @@ import {
 import { TEST_CONTEXT } from '../helpers/test-context.js';
 
 // Real receipt for testing
-const REAL_RECEIPT_URL = 'https://billoggateway.ngrok.app/uploads/599859283680821517.jpeg';
+const REAL_RECEIPT_URL = 'https://billog-gateway.ngrok.app/uploads/599859283680821517.jpeg';
 
 // Track created resources for cleanup
 let createdExpenseIds: string[] = [];

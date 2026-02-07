@@ -18,23 +18,27 @@
     "test:unit": "vitest run tests/unit/"
   },
   "dependencies": {
+    "@ai-sdk/google": "^3.0.22",
     "@google/generative-ai": "^0.21.0",
     "@hono/node-server": "^1.13.0",
     "@mastra/core": "latest",
     "@mastra/evals": "latest",
     "@mastra/hono": "latest",
-    "@mastra/memory": "latest",
     "@mastra/libsql": "latest",
+    "@mastra/loggers": "^1.0.1",
+    "@mastra/memory": "latest",
+    "@mastra/observability": "^1.2.0",
+    "@upstash/vector": "^1.2.2",
     "@whiskeysockets/baileys": "^6.7.16",
     "dotenv": "^16.4.0",
     "hono": "^4.0.0",
     "jsonwebtoken": "^9.0.2",
+    "mastra": "latest",
     "zod": "^3.24.0"
   },
   "devDependencies": {
     "@types/jsonwebtoken": "^9.0.9",
     "@types/node": "^22.0.0",
-    "mastra": "latest",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"

@@ -1,12 +1,12 @@
 import { scoreTraces, scoreTracesWorkflow } from '@mastra/core/evals/scoreTraces';
 import { Mastra } from '@mastra/core';
 import { LibSQLVector, LibSQLStore } from '@mastra/libsql';
+import path, { join, resolve as resolve$2, dirname, extname, basename, isAbsolute, relative } from 'path';
 import { Agent, MessageList, isSupportedLanguageModel, tryGenerateWithJsonFallback, tryStreamWithJsonFallback } from '@mastra/core/agent';
 import { Memory as Memory$1 } from '@mastra/memory';
 import { Workspace, LocalFilesystem } from '@mastra/core/workspace';
 import { UnicodeNormalizer, TokenLimiterProcessor, isProcessorWorkflow } from '@mastra/core/processors';
 import { ModelRouterEmbeddingModel, PROVIDER_REGISTRY, ModelRouterLanguageModel } from '@mastra/core/llm';
-import path, { join, resolve as resolve$2, dirname, extname, basename, isAbsolute, relative } from 'path';
 import { fileURLToPath } from 'url';
 import { createExpenseTool, deleteExpenseTool, getExpenseByIdTool, getExpensesTool } from './tools/67cc85ab-293d-454d-9b13-1940c32e3fc7.mjs';
 import { setUserLanguageTool, getUserPreferencesTool } from './tools/551953aa-fe59-42d8-9606-409be897ed5f.mjs';
@@ -17,6 +17,8 @@ import { recordSettlementTool } from './tools/e530ac36-49d5-4d26-a707-69d9bbca7f
 import { getMyBalanceTool, getSpendingSummaryTool, getBalancesTool } from './tools/4374479b-9bfc-4b45-8dc2-c39992b13757.mjs';
 import { processReceiptTool } from './tools/652371eb-aaa1-4fa9-b64a-0de19f58ec8a.mjs';
 import { processTextExpenseTool } from './tools/532da063-6b34-4743-86b3-316e3c078afd.mjs';
+import { createGoogleGenerativeAI } from '@ai-sdk/google';
+import { c as checkDuplicatePurchaseTool, d as detectItemTypeTool, g as getPerishableWindowTool, s as searchSimilarPurchasesTool } from './insights.tool.mjs';
 import { createStep, createWorkflow } from '@mastra/core/workflows';
 import z$1, { z, ZodObject, ZodFirstPartyTypeKind as ZodFirstPartyTypeKind$1 } from 'zod';
 import { apiRequest, CATEGORIES, formatAmount } from './tools/5aaadd57-6742-4f80-91d8-d525c91493b6.mjs';
@@ -50,11 +52,32 @@ import { tmpdir } from 'os';
 import { MastraServerBase } from '@mastra/core/server';
 import { Buffer as Buffer$1 } from 'buffer';
 import { tools } from './tools.mjs';
+import './expense-item-vector.mjs';
+import '@upstash/vector';
 import 'jsonwebtoken';
 
-const __filename$1 = fileURLToPath(import.meta.url);
-const __dirname$1 = path.dirname(__filename$1);
+const __filename$2 = fileURLToPath(import.meta.url);
+const __dirname$2 = path.dirname(__filename$2);
+function getDataPath(filename) {
+  if (process.env.MEMORY_DATABASE_URL) {
+    return process.env.MEMORY_DATABASE_URL;
+  }
+  return `file:${path.join(process.cwd(), "data", filename)}`;
+}
 const BILLOG_BASE_INSTRUCTIONS = `You are Billog, an AI Bookkeeper that helps users track expenses and split bills through chat.
+
+## Multi-Agent System
+
+You work alongside an Insights Agent that handles shopping intelligence:
+- **You handle**: Expense recording, balance queries, settlements, expense history, help
+- **Insights handles**: Item search queries like "have I bought banana?", duplicate purchase warnings
+
+**Stay silent** (let Insights handle) for:
+- "have I bought X?" / "\u0E0B\u0E37\u0E49\u0E2D X \u0E2B\u0E23\u0E37\u0E2D\u0E22\u0E31\u0E07?"
+- "what groceries did I buy?" / "\u0E0B\u0E37\u0E49\u0E2D\u0E2D\u0E30\u0E44\u0E23\u0E1A\u0E49\u0E32\u0E07?"
+- Shopping history and item lookup questions
+
+**You respond** to everything else: expenses, balances, settlements, help, etc.
 
 ## Skills
 
@@ -126,11 +149,7 @@ Examples:
 When user sends a receipt image:
 1. Call process-receipt tool with the imageUrl
 2. The tool does OCR + creates expense in ONE step
-3. Only respond AFTER getting expenseId from the tool
-4. Include EX:{expenseId} in your response
-
-\u26A0\uFE0F CRITICAL: Use process-receipt (not extract-receipt) for receipts.
-process-receipt handles everything - OCR, expense creation, payment method linking.
+3. Use the tool's message field in your response (it includes EX:{expenseId})
 
 ## Bill Splitting
 
@@ -181,16 +200,18 @@ function getBillogInstructions({ requestContext }) {
   const languageSuffix = LANGUAGE_INSTRUCTIONS[userLanguage] || LANGUAGE_INSTRUCTIONS.th;
   return BILLOG_BASE_INSTRUCTIONS + languageSuffix;
 }
+const memoryDbUrl = getDataPath("agent-memory.db");
+console.log(`[Memory] Database URL: ${memoryDbUrl}`);
 const billogMemory = new Memory$1({
   // Composite storage for memory domain
   storage: new LibSQLStore({
     id: "billog-memory",
-    url: process.env.MEMORY_DATABASE_URL || "file:./data/agent-memory.db"
+    url: memoryDbUrl
   }),
   // Vector store for semantic recall (same DB, different tables)
   vector: new LibSQLVector({
     id: "billog-vector",
-    url: process.env.MEMORY_DATABASE_URL || "file:./data/agent-memory.db"
+    url: memoryDbUrl
   }),
   // Embedder for semantic search (uses OPENAI_API_KEY)
   embedder: new ModelRouterEmbeddingModel("openai/text-embedding-3-small"),
@@ -240,7 +261,7 @@ const tokenLimiter = new TokenLimiterProcessor({
 });
 const billogWorkspace = new Workspace({
   filesystem: new LocalFilesystem({
-    basePath: path.resolve(__dirname$1, ".."),
+    basePath: path.resolve(__dirname$2, ".."),
     // src/mastra/
     readOnly: true
     // Agent doesn't need to write files
@@ -299,6 +320,115 @@ const billogAgent = new Agent({
     setUserLanguage: setUserLanguageTool,
     // Legacy (kept for compatibility)
     createExpense: createExpenseTool
+  }
+});
+
+const google = createGoogleGenerativeAI({
+  apiKey: process.env.GOOGLE_API_KEY
+});
+const INSIGHTS_INSTRUCTIONS = `You are Billog's Shopping Insights assistant.
+You help users with shopping intelligence and zero-waste goals.
+
+## Your Role
+
+1. **When user records an expense** (isExpenseMessage=true):
+   - Check if they recently bought similar items
+   - If found within freshness window: warn gently
+   - If not found or outside window: STAY SILENT (respond with "SILENT")
+
+2. **When user asks about purchases**:
+   - "have I bought banana?" \u2192 search and answer
+   - "what groceries did I buy this week?" \u2192 search and summarize
+   - "\u0E0B\u0E37\u0E49\u0E2D\u0E01\u0E25\u0E49\u0E27\u0E22\u0E2B\u0E23\u0E37\u0E2D\u0E22\u0E31\u0E07?" \u2192 search and answer in Thai
+
+3. **When NOT to respond**:
+   - Balance queries, settlements, expense lists \u2192 STAY SILENT
+   - Help requests about using Billog \u2192 STAY SILENT
+   - General chat unrelated to shopping \u2192 STAY SILENT
+
+## Perishable Windows
+
+| Category | Days | Examples |
+|----------|------|----------|
+| Fresh produce | 7 | banana, vegetables, leafy greens |
+| Dairy | 14 | milk, yogurt, cheese |
+| Bread | 5 | bread, pastries |
+| Meat/seafood | 3 | chicken, fish, shrimp |
+| Eggs | 21 | eggs |
+| Frozen | 60 | frozen items |
+| Pantry | 180 | rice, pasta, canned goods |
+| Non-food | 0 | no check |
+
+## Response Style
+
+- **Brief and helpful** - not preachy
+- **Use emoji sparingly** - just \u26A0\uFE0F for warnings
+- **Only speak when you have useful info**
+- **Keep item names as-is** - don't translate "banana" to "\u0E01\u0E25\u0E49\u0E27\u0E22" or vice versa
+
+## Examples
+
+**Expense with duplicate found:**
+User message indicates expense: "banana 50"
+\u2192 Check for recent banana purchases
+\u2192 If found 3 days ago: "\u26A0\uFE0F You bought banana 3 days ago (2 bunches). Still have some?"
+
+**Expense without duplicate:**
+User message indicates expense: "coffee 65"
+\u2192 Check for recent coffee purchases
+\u2192 Not found or outside window: "SILENT"
+
+**Direct item query:**
+"have I bought banana this week?"
+\u2192 Search and respond: "Yes, you bought banana 3 days ago (2 bunches, \u0E3F50)"
+
+**Non-item query:**
+"who owes what"
+\u2192 "SILENT" (Bookkeeper handles this)
+
+## Critical Rules
+
+1. **ALWAYS respond with "SILENT" when you have nothing useful to say**
+2. Only warn about duplicates if:
+   - Item was purchased within its freshness window
+   - It's a perishable item (not pantry/non-food)
+3. For expense messages, use check-duplicate-purchase tool
+4. For queries, use search-similar-purchases tool
+
+## Context
+
+Each message includes context:
+- Channel: LINE, WHATSAPP, or TELEGRAM
+- SenderChannelId: Who is talking
+- SourceChannelId: Which group/DM
+- IsGroup: true for groups, false for DM
+- isExpenseMessage: true if this is an expense being recorded
+- expenseItems: items from the expense (if available)
+`;
+function getInsightsInstructions({
+  requestContext
+}) {
+  const userLanguage = requestContext?.get("userLanguage") || "th";
+  const languageSuffix = userLanguage === "th" ? `
+
+## \u0E20\u0E32\u0E29\u0E32: \u0E44\u0E17\u0E22
+\u0E15\u0E2D\u0E1A\u0E40\u0E1B\u0E47\u0E19\u0E20\u0E32\u0E29\u0E32\u0E44\u0E17\u0E22` : `
+
+## LANGUAGE: ENGLISH
+Respond in English.`;
+  return INSIGHTS_INSTRUCTIONS + languageSuffix;
+}
+const insightsAgent = new Agent({
+  id: "insights",
+  name: "Insights",
+  description: "Shopping intelligence agent for duplicate warnings and item queries",
+  instructions: getInsightsInstructions,
+  model: google("gemini-2.0-flash"),
+  tools: {
+    searchSimilarPurchases: searchSimilarPurchasesTool,
+    getPerishableWindow: getPerishableWindowTool,
+    detectItemType: detectItemTypeTool,
+    checkDuplicatePurchase: checkDuplicatePurchaseTool
   }
 });
 
@@ -545,18 +675,9 @@ ${"=".repeat(60)}`);
 });
 
 const genAI$1 = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY || "");
-const EXTRACT_TEXT_PROMPT$1 = `Extract ALL text from this image exactly as shown.
-Include every word, number, and symbol visible.
-Return ONLY the raw text, no formatting or explanation.`;
 const categoryList$1 = Object.keys(CATEGORIES).join("|");
-const ANALYZE_TEXT_PROMPT$1 = `Analyze this receipt text and extract structured data as JSON.
+const OCR_PROMPT$1 = `Extract and analyze this receipt image. Return JSON only.
 
-Receipt text:
----
-{TEXT}
----
-
-Return JSON:
 {
   "isReceipt": true/false,
   "storeName": "store name in English",
@@ -667,13 +788,11 @@ ${"=".repeat(60)}`);
       } else {
         imageData = await downloadImage$1(inputData.imageUrl);
       }
-      console.log("[OCR] Extracting text...");
-      const rawText = await callGemini$1("gemini-2.0-flash", [
-        EXTRACT_TEXT_PROMPT$1,
+      console.log("[OCR] Processing receipt...");
+      const analysisText = await callGemini$1("gemini-2.0-flash", [
+        OCR_PROMPT$1,
         { inlineData: { data: imageData.data, mimeType: imageData.mimeType } }
       ]);
-      console.log("[OCR] Analyzing text...");
-      const analysisText = await callGemini$1("gemini-2.0-flash", [ANALYZE_TEXT_PROMPT$1.replace("{TEXT}", rawText)]);
       const ocrResult = parseJSON$3(analysisText);
       if (!ocrResult.isReceipt) {
         setState({ ...state, messageType: "expense_receipt", isReceipt: false });
@@ -1377,18 +1496,9 @@ ${"=".repeat(60)}`);
 });
 
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY || "");
-const EXTRACT_TEXT_PROMPT = `Extract ALL text from this image exactly as shown.
-Include every word, number, and symbol visible.
-Return ONLY the raw text, no formatting or explanation.`;
 const categoryList = Object.keys(CATEGORIES).join("|");
-const ANALYZE_TEXT_PROMPT = `Analyze this receipt text and extract structured data as JSON.
+const OCR_PROMPT = `Extract and analyze this receipt image. Return JSON only.
 
-Receipt text:
----
-{TEXT}
----
-
-Return JSON:
 {
   "isReceipt": true/false,
   "storeName": "store name in English",
@@ -1505,13 +1615,11 @@ ${"=".repeat(60)}`);
       } else {
         imageData = await downloadImage(inputData.imageUrl);
       }
-      console.log("[OCR] Extracting text...");
-      const rawText = await callGemini("gemini-2.0-flash", [
-        EXTRACT_TEXT_PROMPT,
+      console.log("[OCR] Processing receipt...");
+      const analysisText = await callGemini("gemini-2.0-flash", [
+        OCR_PROMPT,
         { inlineData: { data: imageData.data, mimeType: imageData.mimeType } }
       ]);
-      console.log("[OCR] Analyzing text...");
-      const analysisText = await callGemini("gemini-2.0-flash", [ANALYZE_TEXT_PROMPT.replace("{TEXT}", rawText)]);
       const ocrResult = parseJSON$2(analysisText);
       if (!ocrResult.isReceipt) {
         setState({ ...state, messageType: "expense_receipt", isReceipt: false });
@@ -1912,19 +2020,28 @@ const messageWorkflow = createWorkflow({
   ]
 ]).commit();
 
+function getMastraDbUrl() {
+  if (process.env.MASTRA_DATABASE_URL) {
+    return process.env.MASTRA_DATABASE_URL;
+  }
+  return `file:${path.join(process.cwd(), "data", "mastra.db")}`;
+}
 ({
   // Group activation settings
   groupActivation: {
     mentionPatterns: process.env.GROUP_MENTION_PATTERNS?.split(",") || ["@billog", "billog"]
   }
 });
+const mastraDbUrl = getMastraDbUrl();
+console.log(`[Mastra] Database URL: ${mastraDbUrl}`);
 const storage = new LibSQLStore({
   id: "billog-mastra",
-  url: process.env.MASTRA_DATABASE_URL || "file:./data/mastra.db"
+  url: mastraDbUrl
 });
 const mastra = new Mastra({
   agents: {
-    billog: billogAgent
+    billog: billogAgent,
+    insights: insightsAgent
   },
   workflows: {
     messageWorkflow

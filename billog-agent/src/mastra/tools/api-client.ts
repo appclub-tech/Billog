@@ -46,17 +46,8 @@ export async function apiRequest<T>(
   const token = generateJwt(context);
   const requestId = Math.random().toString(36).substring(2, 10);
 
-  // Log outbound request
-  console.log(`\n${'─'.repeat(50)}`);
-  console.log(`[API] 📤 REQUEST [${requestId}]`);
-  console.log(`${'─'.repeat(50)}`);
-  console.log(`  Method:     ${method}`);
-  console.log(`  URL:        ${url}`);
-  console.log(`  Context:    ${JSON.stringify(context)}`);
-  if (body) {
-    console.log(`  Body:       ${JSON.stringify(body, null, 2).substring(0, 500)}`);
-  }
-  console.log(`${'─'.repeat(50)}`);
+  // Log outbound request (compact)
+  console.log(`[API] ${method} ${path}`);
 
   const startTime = Date.now();
 
@@ -74,14 +65,8 @@ export async function apiRequest<T>(
     const duration = Date.now() - startTime;
     const responseText = await response.text();
 
-    // Log response
-    console.log(`\n${'─'.repeat(50)}`);
-    console.log(`[API] 📥 RESPONSE [${requestId}] ${response.status} ${duration}ms`);
-    console.log(`${'─'.repeat(50)}`);
-    console.log(`  Status:     ${response.status} ${response.statusText}`);
-    console.log(`  Duration:   ${duration}ms`);
-    console.log(`  Body:       ${responseText.substring(0, 500)}${responseText.length > 500 ? '...' : ''}`);
-    console.log(`${'─'.repeat(50)}\n`);
+    // Log response (compact)
+    console.log(`[API] ${response.status} ${duration}ms`);
 
     if (!response.ok) {
       throw new Error(`API Error ${response.status}: ${responseText}`);
@@ -96,11 +81,8 @@ export async function apiRequest<T>(
     }
   } catch (error) {
     const duration = Date.now() - startTime;
-    console.log(`\n${'─'.repeat(50)}`);
-    console.log(`[API] ❌ ERROR [${requestId}] ${duration}ms`);
-    console.log(`${'─'.repeat(50)}`);
-    console.log(`  Error:      ${error instanceof Error ? error.message : String(error)}`);
-    console.log(`${'─'.repeat(50)}\n`);
+    const errMsg = error instanceof Error ? error.message : String(error);
+    console.error(`[API] ❌ ${method} ${path} failed ${duration}ms: ${errMsg}`);
     throw error;
   }
 }

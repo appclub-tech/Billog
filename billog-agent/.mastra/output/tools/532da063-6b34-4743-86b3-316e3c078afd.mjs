@@ -1,7 +1,9 @@
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
 import { formatAmount, apiRequest, detectCategory } from './5aaadd57-6742-4f80-91d8-d525c91493b6.mjs';
+import { i as isVectorStoreConfigured, a as saveExpenseItemEmbeddings } from '../expense-item-vector.mjs';
 import 'jsonwebtoken';
+import '@upstash/vector';
 
 function parseExpenseText(text) {
   let description = null;
@@ -137,6 +139,11 @@ ${"=".repeat(60)}`);
       sourceChannelId,
       sourceType: isGroup ? "GROUP" : "DM"
     };
+    const expenseItem = {
+      name: parsed.description,
+      quantity: 1,
+      unitPrice: parsed.amount
+    };
     try {
       const response = await apiRequest("POST", "/expenses", context, {
         channel,
@@ -148,7 +155,9 @@ ${"=".repeat(60)}`);
         currency: parsed.currency,
         date: parsed.date,
         splitType: parsed.splitType,
-        splits: parsed.splitTargets.map((target) => ({ target }))
+        splits: parsed.splitTargets.map((target) => ({ target })),
+        // Always include items - even single item purchases
+        items: [expenseItem]
       });
       if (!response.expense?.id) {
         console.error(`[TextExpense] \u274C FAILED: No expenseId in response`);
@@ -158,6 +167,17 @@ ${"=".repeat(60)}`);
         };
       }
       console.log(`[TextExpense] \u2705 SUCCESS: EX:${response.expense.id}`);
+      if (isVectorStoreConfigured()) {
+        const expenseDate = response.expense.date || (/* @__PURE__ */ new Date()).toISOString();
+        saveExpenseItemEmbeddings(
+          response.expense.id,
+          [expenseItem],
+          sourceChannelId,
+          expenseDate,
+          senderChannelId
+          // Who paid
+        ).catch((err) => console.error("[Vector] Embedding save error:", err));
+      }
       const formattedAmount = formatAmount(response.expense.amount, response.expense.currency);
       let message = `${response.expense.description} | ${formattedAmount}`;
       message += `

@@ -1,6 +1,7 @@
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
 import { apiRequest, detectCategory, formatAmount, CATEGORIES, type ApiContext, type CategoryName } from './api-client.js';
+import { saveExpenseItemEmbeddings, isVectorStoreConfigured } from '../vector/index.js';
 
 /**
  * Expense Item schema for receipts with line items
@@ -142,6 +143,15 @@ For receipts: pass receiptData from extract-receipt to link the receipt.`,
       // Use date from input, or from metadata.transactionDate
       const expenseDate = input.date || input.metadata?.transactionDate || undefined;
 
+      // Ensure we always have items (even for single-item expenses)
+      const expenseItems = (input.items && input.items.length > 0)
+        ? input.items
+        : [{
+            name: input.description,
+            quantity: 1,
+            unitPrice: input.amount,
+          }];
+
       const response = await apiRequest<{
         expense: { id: string; description: string; amount: number; currency: string; date: string };
         splits: Array<{ userId: string; name: string | null; amount: number }>;
@@ -158,7 +168,7 @@ For receipts: pass receiptData from extract-receipt to link the receipt.`,
         // TODO: implement category name-to-ID resolution
         splitType: input.splitType,
         splits: input.splits,
-        items: input.items,
+        items: expenseItems,
         notes: input.notes,
         metadata: Object.keys(expenseMetadata).length > 0 ? expenseMetadata : undefined,
         // Receipt data from OCR - creates Receipt record after expense
@@ -175,6 +185,28 @@ For receipts: pass receiptData from extract-receipt to link the receipt.`,
       }
 
       console.log(`[TOOL] ✅ create-expense SUCCESS: EX:${response.expense.id}`);
+
+      // Save embeddings for Insights Agent (non-blocking)
+      if (isVectorStoreConfigured()) {
+        const vectorDate = response.expense.date || new Date().toISOString();
+        const paidBy = senderChannelId; // Who paid
+
+        // Always save items (we ensured expenseItems exists above)
+        saveExpenseItemEmbeddings(
+          response.expense.id,
+          expenseItems.map((item) => ({
+            name: item.name,
+            nameLocalized: item.nameLocalized,
+            quantity: item.quantity || 1,
+            unit: undefined, // Not in current schema
+            unitPrice: item.unitPrice,
+            totalPrice: (item.quantity || 1) * item.unitPrice,
+          })),
+          sourceChannelId,
+          vectorDate,
+          paidBy
+        ).catch((err) => console.error('[Vector] Embedding save error:', err));
+      }
 
       // Format success message (English - agent translates using interpreter skill)
       const formattedAmount = formatAmount(response.expense.amount, response.expense.currency);

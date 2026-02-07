@@ -20,21 +20,11 @@ import {
 // Initialize Gemini
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY || '');
 
-// OCR Prompts
-const EXTRACT_TEXT_PROMPT = `Extract ALL text from this image exactly as shown.
-Include every word, number, and symbol visible.
-Return ONLY the raw text, no formatting or explanation.`;
-
+// Single OCR prompt - extract and analyze in one call
 const categoryList = Object.keys(CATEGORIES).join('|');
 
-const ANALYZE_TEXT_PROMPT = `Analyze this receipt text and extract structured data as JSON.
+const OCR_PROMPT = `Extract and analyze this receipt image. Return JSON only.
 
-Receipt text:
----
-{TEXT}
----
-
-Return JSON:
 {
   "isReceipt": true/false,
   "storeName": "store name in English",
@@ -161,16 +151,12 @@ export const dmProcessReceiptStep = createStep({
         imageData = await downloadImage(inputData.imageUrl!);
       }
 
-      // OCR Step 1: Extract text
-      console.log('[OCR] Extracting text...');
-      const rawText = await callGemini('gemini-2.0-flash', [
-        EXTRACT_TEXT_PROMPT,
+      // Single OCR call - extract and analyze together
+      console.log('[OCR] Processing receipt...');
+      const analysisText = await callGemini('gemini-2.0-flash', [
+        OCR_PROMPT,
         { inlineData: { data: imageData.data, mimeType: imageData.mimeType } },
       ]);
-
-      // OCR Step 2: Analyze text
-      console.log('[OCR] Analyzing text...');
-      const analysisText = await callGemini('gemini-2.0-flash', [ANALYZE_TEXT_PROMPT.replace('{TEXT}', rawText)]);
       const ocrResult = parseJSON(analysisText);
 
       if (!ocrResult.isReceipt) {
